@@ -1,8 +1,2 @@
-import { z } from 'zod';
-
-export const VerifierResultSchema = z.object({
-  success: z.boolean(),
-  reason: z.string(),
-});
-
-export type VerifierResult = z.infer<typeof VerifierResultSchema>;
+// stub — Day 2 / Hour 5+ work
+// export verification logic here later
