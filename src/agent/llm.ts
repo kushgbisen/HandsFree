@@ -36,7 +36,7 @@ function getConfig(): LLMConfig | null {
         return {
           provider: 'aistudio',
           apiKey: aistudioKey,
-          model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+          model: process.env.GEMINI_MODEL ?? 'gemini-3.1-flash-lite',
         };
       case 'deepseek':
         if (!deepseekKey) return null;
@@ -78,7 +78,7 @@ function getConfig(): LLMConfig | null {
     return {
       provider: 'aistudio',
       apiKey: aistudioKey,
-      model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+      model: process.env.GEMINI_MODEL ?? 'gemini-3.1-flash-lite',
     };
   }
   if (deepseekKey) {

@@ -33,7 +33,7 @@ export async function initBrowser(targetUrl = 'https://example.com') {
     try {
       const model = openaiKey
         ? { modelName: 'openai/gpt-4o-mini' as const, apiKey: openaiKey }
-        : { modelName: 'google/gemini-2.5-flash' as const, apiKey: aistudioKey! };
+        : { modelName: 'google/gemini-3.1-flash-lite-preview' as const, apiKey: aistudioKey! };
       stagehand = await Stagehand.create({ browser, model } as never);
     } catch (e) {
       console.warn('[browser] stagehand init failed, falling back to playwright:', e);
