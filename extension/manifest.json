@@ -6,7 +6,8 @@
   "permissions": ["storage", "offscreen", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
-    "service_worker": "src/background.js"
+    "service_worker": "src/background.js",
+    "type": "module"
   },
   "content_scripts": [
     {

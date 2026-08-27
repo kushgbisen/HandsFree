@@ -5,14 +5,12 @@
 const HUD_ID = 'hf-hud';
 const STYLE_ID = 'hf-hud-style';
 const HIGHLIGHT_CLASS = 'hf-highlight';
-
 const port = chrome.runtime.connect({ name: 'keepalive' });
 port.onDisconnect.addListener(() =>
   setTimeout(() => chrome.runtime.connect({ name: 'keepalive' }), 1000),
 );
-
 // HUD
-function injectHud(): void {
+function injectHud() {
   if (document.getElementById(HUD_ID)) return;
   const style = document.createElement('style');
   style.id = STYLE_ID;
@@ -41,25 +39,22 @@ else injectHud();
 new MutationObserver(() => {
   if (!document.getElementById(HUD_ID) && document.body) injectHud();
 }).observe(document.documentElement, { childList: true, subtree: true });
-
-export type Candidate = { id: number; selector: string; description: string; method?: string };
-
-async function observe(): Promise<Candidate[]> {
+async function observe() {
   document.querySelectorAll('[data-hf-id]').forEach((el) => el.removeAttribute('data-hf-id'));
   const els = Array.from(
     document.querySelectorAll(
       'button, a[href], input, select, textarea, [role="button"], [role="link"], [onclick]',
     ),
   ).filter((el) => {
-    if ((el as HTMLElement).closest(`#${HUD_ID}`)) return false;
-    const r = (el as HTMLElement).getBoundingClientRect();
-    const s = getComputedStyle(el as HTMLElement);
+    if (el.closest(`#${HUD_ID}`)) return false;
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
   });
   return els.slice(0, 40).map((el, i) => {
-    (el as HTMLElement).setAttribute('data-hf-id', String(i));
+    el.setAttribute('data-hf-id', String(i));
     const isInput = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
-    const live = isInput ? (el as HTMLInputElement).value?.trim() : '';
+    const live = isInput ? el.value?.trim() : '';
     const text = (
       live ||
       el.textContent?.trim() ||
@@ -78,31 +73,28 @@ async function observe(): Promise<Candidate[]> {
     };
   });
 }
-
-async function highlight(selector: string): Promise<void> {
+async function highlight(selector) {
   document
     .querySelectorAll(`.${HIGHLIGHT_CLASS}`)
     .forEach((el) => el.classList.remove(HIGHLIGHT_CLASS));
-  const el = document.querySelector(selector) as HTMLElement | null;
+  const el = document.querySelector(selector);
   if (el) {
     el.classList.add(HIGHLIGHT_CLASS);
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await new Promise((r) => setTimeout(r, 600));
   }
 }
-
-async function act(candidate: Candidate, value?: string): Promise<void> {
-  const el = document.querySelector(candidate.selector) as HTMLElement | null;
+async function act(candidate, value) {
+  const el = document.querySelector(candidate.selector);
   if (!el) throw new Error('candidate not found');
   if (value !== undefined || candidate.method === 'fill') {
-    (el as HTMLInputElement).value = value ?? '';
+    el.value = value ?? '';
     el.dispatchEvent(new Event('input', { bubbles: true }));
   } else {
-    (el as HTMLElement).click();
+    el.click();
   }
   setTimeout(() => el.classList.remove(HIGHLIGHT_CLASS), 300);
 }
-
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg.type === 'observe') {
@@ -133,3 +125,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true;
 });
+export {};

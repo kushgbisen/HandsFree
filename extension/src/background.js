@@ -3,45 +3,34 @@
  * Fix #1 keepalive via Port + storage.session checkpoint
  */
 import { callLLM } from './llm.js';
-
-type Candidate = { id: number; selector: string; description: string; method?: string };
-type Plan = { index: number; reasoning: string; value?: string };
-
-const queue: Array<() => Promise<void>> = [];
+const queue = [];
 let running = false;
 let currentAbort = new AbortController();
-
 // keepalive
-const ports = new Set<chrome.runtime.Port>();
+const ports = new Set();
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'keepalive') return;
   ports.add(port);
   port.onDisconnect.addListener(() => ports.delete(port));
 });
-
-async function getActiveTabId(): Promise<number | null> {
+async function getActiveTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id ?? null;
 }
-
-async function observe(tabId: number): Promise<Candidate[]> {
+async function observe(tabId) {
   const res = await chrome.tabs.sendMessage(tabId, { type: 'observe' });
   return res?.candidates ?? [];
 }
-
-async function highlight(tabId: number, selector: string): Promise<void> {
+async function highlight(tabId, selector) {
   await chrome.tabs.sendMessage(tabId, { type: 'highlight', selector });
 }
-
-async function act(tabId: number, candidate: Candidate, value?: string): Promise<void> {
+async function act(tabId, candidate, value) {
   await chrome.tabs.sendMessage(tabId, { type: 'act', candidate, value });
 }
-
-async function updateHud(tabId: number, update: any): Promise<void> {
+async function updateHud(tabId, update) {
   chrome.tabs.sendMessage(tabId, { type: 'hud', update }).catch(() => {});
 }
-
-async function planWithLLM(transcript: string, candidates: Candidate[]): Promise<Plan> {
+async function planWithLLM(transcript, candidates) {
   const system = `You are HandsFree planner. Choose ONLY from candidates. Return {"index":<id>,"reasoning":"<brief>","value":"<optional>"}`;
   const user = `Transcript: "${transcript}"\nCandidates:\n${JSON.stringify(
     candidates.map((c) => ({ id: c.id, description: c.description, method: c.method })),
@@ -55,8 +44,7 @@ async function planWithLLM(transcript: string, candidates: Candidate[]): Promise
     throw new Error(`index ${raw.index} out of range`);
   return { index: raw.index, reasoning: raw.reasoning ?? '', value: raw.value ?? undefined };
 }
-
-function fallbackPlan(transcript: string, candidates: Candidate[]): Plan {
+function fallbackPlan(transcript, candidates) {
   const words = transcript
     .toLowerCase()
     .split(/\s+/)
@@ -77,14 +65,7 @@ function fallbackPlan(transcript: string, candidates: Candidate[]): Plan {
   });
   return { index: best, reasoning: `fallback: chose ${candidates[best].description}` };
 }
-
-async function verify(
-  transcript: string,
-  plan: Plan,
-  beforeUrl: string,
-  afterUrl: string,
-  afterCandidates: Candidate[],
-): Promise<{ success: boolean; reason: string }> {
+async function verify(transcript, plan, beforeUrl, afterUrl, afterCandidates) {
   if (beforeUrl !== afterUrl) return { success: true, reason: `URL changed` };
   if (plan.value) {
     const v = plan.value.toLowerCase();
@@ -94,11 +75,9 @@ async function verify(
   // for click, assume success if still has candidates (conservative)
   return { success: true, reason: 'assume click performed' };
 }
-
-async function runCommand(transcript: string, signal: AbortSignal): Promise<void> {
+async function runCommand(transcript, signal) {
   const tabId = await getActiveTabId();
   if (!tabId) throw new Error('no active tab');
-
   await updateHud(tabId, { transcript: `"${transcript}"`, status: 'Observing...' });
   let beforeUrl = '';
   try {
@@ -111,7 +90,7 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
     const candidates = await observe(tabId);
     if (!candidates.length) throw new Error('no candidates');
     await updateHud(tabId, { plan: `Found ${candidates.length}`, status: 'Planning...' });
-    let plan: Plan;
+    let plan;
     try {
       plan = await planWithLLM(transcript, candidates);
     } catch {
@@ -158,22 +137,20 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
     retries++;
   }
 }
-
 // offscreen for mic
 async function ensureOffscreen() {
   const has = await chrome.offscreen.hasDocument?.();
   if (!has)
     await chrome.offscreen.createDocument({
       url: 'src/offscreen.html',
-      reasons: ['AUDIO_PLAYBACK'] as any,
+      reasons: ['AUDIO_PLAYBACK'],
       justification: 'Mic for HandsFree',
     });
 }
-
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg.type === 'speech' && msg.isFinal && msg.text) {
-      const text: string = msg.text.trim();
+      const text = msg.text.trim();
       if (!text) return;
       // interrupt handling
       const isStop = /\b(stop|cancel|wait|hold on|abort)\b/i.test(text);
@@ -212,7 +189,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (!running) {
         running = true;
         while (queue.length) {
-          const fn = queue.shift()!;
+          const fn = queue.shift();
           await fn();
         }
         running = false;
@@ -227,7 +204,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true;
 });
-
 // keep offscreen alive
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'keepalive') port.onDisconnect.addListener(() => {});
