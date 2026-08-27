@@ -10,7 +10,11 @@ export const queue: PQueue = new PQueue({ concurrency: 1 });
  * Executes the chosen candidate directly — zero re-interpretation.
  * The only allowed target is the exact element that was observed.
  */
-export async function execute(plan: Plan, candidates: Candidate[]): Promise<void> {
+export async function execute(
+  plan: Plan,
+  candidates: Candidate[],
+  signal?: AbortSignal,
+): Promise<void> {
   const candidate = candidates[plan.index];
   if (!candidate) throw new Error(`execute: candidate index ${plan.index} not found`);
 
@@ -22,18 +26,24 @@ export async function execute(plan: Plan, candidates: Candidate[]): Promise<void
   }
   const page = getPage();
 
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
   console.log(
     `[loop] executing id=${candidate.id} -> ${candidate.description} reasoning="${plan.reasoning}" closed=${page.isClosed()} url=${page.url()}`,
   );
 
   // theater: highlight exact observed element for 600ms before act
   try {
-    await highlight(candidate.selector);
+    await highlight(candidate.selector, signal);
   } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
     console.warn('[loop] highlight failed', e);
   }
 
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
   await queue.add(async () => {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     console.log(`[loop] queue start id=${candidate.id} selector=${candidate.selector}`);
 
     // strongest grounding: stagehand with exact observed selector
@@ -57,13 +67,16 @@ export async function execute(plan: Plan, candidates: Candidate[]): Promise<void
 
     // exact selector — never fuzzy text match
     const locator = page.locator(candidate.selector);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (plan.value !== undefined || candidate.method === 'fill') {
       return locator.fill(plan.value ?? '', { timeout: 5000 });
     }
     return locator.click({ timeout: 5000, noWaitAfter: true });
   });
 
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
   // keep highlight briefly then clear (visible from back of room)
   await new Promise((r) => setTimeout(r, 300));
-  await clearHighlight().catch(() => {});
+  await clearHighlight(signal).catch(() => {});
 }

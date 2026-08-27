@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { initBrowser, getPage, getBrowser } from './browser/launch.js';
 import { observe, type Candidate } from './browser/observe.js';
 import { plan, type Plan } from './agent/planner.js';
-import { execute } from './agent/loop.js';
+import { execute, queue } from './agent/loop.js';
 import { verify } from './agent/verifier.js';
 import { injectHud, updateHud } from './browser/hud.js';
 
@@ -23,9 +23,47 @@ app.use(express.static(hudDir));
 app.get('/', (_req, res) => res.sendFile(path.join(hudDir, 'index.html')));
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
+let currentAbort = new AbortController();
+
+function isInterrupt(text: string): boolean {
+  return /\b(stop|cancel|wait|hold on|abort)\b/i.test(text);
+}
+
+function extractNewIntent(text: string): string | null {
+  // "stop — actually search for AI news" -> "search for AI news"
+  const actuallyMatch = text.match(/actually[,:]?\s*(.+)/i);
+  if (actuallyMatch) return actuallyMatch[1].trim();
+  // "stop cancel" with extra words: strip stop words and return remainder
+  const cleaned = text
+    .replace(/\b(stop|cancel|wait|hold on|abort)\b/gi, '')
+    .replace(/[—\-:,]+/g, ' ')
+    .trim();
+  return cleaned.length > 2 ? cleaned : null;
+}
+
 app.post('/command', async (req, res) => {
-  const text: string | undefined = req.body?.text?.trim();
+  let text: string | undefined = req.body?.text?.trim();
   if (!text) return res.status(400).json({ message: 'missing text' });
+
+  // live interrupt — any new voice can preempt current queue
+  if (isInterrupt(text)) {
+    const newIntent = extractNewIntent(text);
+    currentAbort.abort();
+    queue.clear();
+    await updateHud({
+      status: 'Interrupted',
+      verification: '⚡ Interrupted',
+      showStop: false,
+    }).catch(() => {});
+    console.log(`[interrupt] "${text}" -> abort, newIntent=${newIntent ?? 'none'}`);
+    if (!newIntent) {
+      return res.json({ message: 'interrupted', interrupted: true });
+    }
+    text = newIntent;
+    // fall through to execute newIntent with fresh abort controller
+  }
+  currentAbort = new AbortController();
+  const signal = currentAbort.signal;
 
   try {
     const page = getPage();
@@ -50,6 +88,7 @@ app.post('/command', async (req, res) => {
 
     // verify loop — fresh observe every iteration
     while (retries <= maxRetries) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
       candidates = await observe();
       console.log(
         `[command] observed ${candidates.length} candidates (try ${retries + 1}/${maxRetries + 1})`,
@@ -60,6 +99,7 @@ app.post('/command', async (req, res) => {
       }).catch(() => {});
       if (candidates.length === 0) throw new Error('no candidates observed');
 
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
       const chosen = await plan(text, candidates);
       const candidate = candidates[chosen.index];
       console.log(
@@ -70,11 +110,13 @@ app.post('/command', async (req, res) => {
         status: 'Acting...',
       }).catch(() => {});
 
-      await execute(chosen, candidates);
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      await execute(chosen, candidates, signal);
       await updateHud({ status: 'Verifying...' }).catch(() => {});
 
       // small settle before verify
       await new Promise((r) => setTimeout(r, 400));
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
       const afterUrl = page.url();
       const afterCandidates = await observe();
       const result = await verify(text, chosen, beforeUrl, afterUrl, afterCandidates);
@@ -132,6 +174,10 @@ app.post('/command', async (req, res) => {
       candidates,
     });
   } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      console.log('[command] aborted');
+      return res.json({ message: 'interrupted', interrupted: true });
+    }
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[command] failed:', msg);
     res.status(500).json({ message: `failed: ${msg}` });

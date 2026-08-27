@@ -34,11 +34,22 @@ async function ensureStyle(): Promise<void> {
   );
 }
 
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(t);
+      reject(new DOMException('Aborted', 'AbortError'));
+    });
+  });
+}
+
 /**
  * Highlights the exact observed element for 600ms (theater).
  * Must be called with the selector returned by observe() — never invented.
  */
-export async function highlight(selector: string): Promise<void> {
+export async function highlight(selector: string, signal?: AbortSignal): Promise<void> {
   const page = getPage();
   await ensureStyle();
 
@@ -58,10 +69,10 @@ export async function highlight(selector: string): Promise<void> {
   );
 
   // theater pause — judges need to see the agent "think" before it acts
-  await new Promise((r) => setTimeout(r, 600));
+  await sleepWithSignal(600, signal);
 }
 
-export async function clearHighlight(): Promise<void> {
+export async function clearHighlight(signal?: AbortSignal): Promise<void> {
   const page = getPage();
   await page
     .evaluate((cls: string) => {
