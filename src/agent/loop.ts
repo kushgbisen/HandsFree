@@ -2,6 +2,7 @@ import PQueue from 'p-queue';
 import type { Plan } from './planner.js';
 import type { Candidate } from '../browser/observe.js';
 import { getStagehand, getPage } from '../browser/launch.js';
+import { clearHighlight, highlight } from '../browser/highlight.js';
 
 export const queue: PQueue = new PQueue({ concurrency: 1 });
 
@@ -24,6 +25,13 @@ export async function execute(plan: Plan, candidates: Candidate[]): Promise<void
   console.log(
     `[loop] executing id=${candidate.id} -> ${candidate.description} reasoning="${plan.reasoning}" closed=${page.isClosed()} url=${page.url()}`,
   );
+
+  // theater: highlight exact observed element for 600ms before act
+  try {
+    await highlight(candidate.selector);
+  } catch (e) {
+    console.warn('[loop] highlight failed', e);
+  }
 
   await queue.add(async () => {
     console.log(`[loop] queue start id=${candidate.id} selector=${candidate.selector}`);
@@ -54,4 +62,8 @@ export async function execute(plan: Plan, candidates: Candidate[]): Promise<void
     }
     return locator.click({ timeout: 5000, noWaitAfter: true });
   });
+
+  // keep highlight briefly then clear (visible from back of room)
+  await new Promise((r) => setTimeout(r, 300));
+  await clearHighlight().catch(() => {});
 }
