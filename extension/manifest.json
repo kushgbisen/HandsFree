@@ -20,8 +20,5 @@
   "action": {
     "default_popup": "src/popup.html",
     "default_title": "HandsFree"
-  },
-  "icons": {
-    "128": "icons/icon128.png"
   }
 }
