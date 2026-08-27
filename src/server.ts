@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initBrowser, getPage } from './browser/launch.js';
+import { initBrowser, getPage, getBrowser } from './browser/launch.js';
 import { plan } from './agent/planner.js';
 import { execute } from './agent/loop.js';
 
@@ -31,11 +31,15 @@ app.post('/command', async (req, res) => {
     let snapshot = '';
     try {
       const page = getPage();
-      // stagehand observe gives structured candidates; page.content gives raw html
+      const browser = getBrowser();
+      console.log(
+        `[command] snapshot — page closed=${page.isClosed()} browser connected=${browser.isConnected()} contexts=${browser.contexts().length}`,
+      );
       snapshot = await page.content();
       // keep it small for LLM
       snapshot = snapshot.slice(0, 12000);
-    } catch {
+    } catch (e) {
+      console.warn('[command] snapshot failed', e);
       snapshot = `page url: ${testUrl}`;
     }
 
