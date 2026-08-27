@@ -3,9 +3,10 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initBrowser, getPage, getBrowser } from './browser/launch.js';
-import { observe } from './browser/observe.js';
-import { plan } from './agent/planner.js';
+import { observe, type Candidate } from './browser/observe.js';
+import { plan, type Plan } from './agent/planner.js';
 import { execute } from './agent/loop.js';
+import { verify } from './agent/verifier.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,34 +27,77 @@ app.post('/command', async (req, res) => {
   if (!text) return res.status(400).json({ message: 'missing text' });
 
   try {
-    // 1. fresh observation — no persisted knowledge, every page is unknown
     const page = getPage();
     const browser = getBrowser();
     console.log(
       `[command] "${text}" — page closed=${page.isClosed()} browser connected=${browser.isConnected()} url=${page.url()}`,
     );
 
-    const candidates = await observe();
-    console.log(`[command] observed ${candidates.length} candidates`);
+    let beforeUrl = page.url();
+    let lastPlan: Plan | null = null;
+    let lastCandidate: Candidate | null = null;
+    let candidates: Candidate[] = [];
+    let retries = 0;
+    const maxRetries = 2;
 
-    if (candidates.length === 0) {
-      return res.status(500).json({ message: 'no candidates observed' });
+    // verify loop — fresh observe every iteration
+    while (retries <= maxRetries) {
+      candidates = await observe();
+      console.log(
+        `[command] observed ${candidates.length} candidates (try ${retries + 1}/${maxRetries + 1})`,
+      );
+      if (candidates.length === 0) throw new Error('no candidates observed');
+
+      const chosen = await plan(text, candidates);
+      const candidate = candidates[chosen.index];
+      console.log(
+        `[command] plan chose id=${chosen.index} -> ${candidate.description} reasoning="${chosen.reasoning}"`,
+      );
+
+      await execute(chosen, candidates);
+
+      // small settle before verify
+      await new Promise((r) => setTimeout(r, 400));
+      const afterUrl = page.url();
+      const afterCandidates = await observe();
+      const result = await verify(text, chosen, beforeUrl, afterUrl, afterCandidates);
+      console.log(
+        `[verify] ${result.success ? '✓' : '↻'} ${result.reason} (retry ${retries}/${maxRetries})`,
+      );
+
+      lastPlan = chosen;
+      lastCandidate = candidate;
+
+      if (result.success) {
+        return res.json({
+          message: `✓ verified id ${chosen.index} -> ${candidate.description} — ${result.reason}`,
+          plan: chosen,
+          candidate,
+          candidates: afterCandidates,
+          verification: result,
+        });
+      }
+
+      if (retries === maxRetries) {
+        return res.json({
+          message: `need help — click to take over (after ${retries + 1} tries): ${result.reason}`,
+          plan: chosen,
+          candidate,
+          candidates: afterCandidates,
+          verification: result,
+        });
+      }
+
+      console.log(`[verify] ↻ retrying (${retries + 1}/${maxRetries}) — ${result.reason}`);
+      beforeUrl = afterUrl;
+      retries++;
     }
 
-    // 2. plan — may only choose from what was just observed
-    const chosen = await plan(text, candidates);
-    const candidate = candidates[chosen.index];
-    console.log(
-      `[command] plan chose id=${chosen.index} -> ${candidate.description} reasoning="${chosen.reasoning}"`,
-    );
-
-    // 3. execute — direct on exact observed element
-    await execute(chosen, candidates);
-
+    // fallback (should not reach)
     res.json({
-      message: `executed id ${chosen.index} -> ${candidate.description}`,
-      plan: chosen,
-      candidate,
+      message: `executed id ${lastPlan?.index} -> ${lastCandidate?.description}`,
+      plan: lastPlan,
+      candidate: lastCandidate,
       candidates,
     });
   } catch (err) {

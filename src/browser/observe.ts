@@ -68,7 +68,13 @@ export async function observe(): Promise<Candidate[]> {
 
     return els.slice(0, 40).map((el, i) => {
       (el as HTMLElement).setAttribute('data-hf-id', String(i));
+      const isInput =
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLSelectElement;
+      const liveValue = isInput ? (el as HTMLInputElement).value?.trim() : '';
       const text = (
+        liveValue ||
         el.textContent?.trim() ||
         el.getAttribute('aria-label') ||
         el.getAttribute('placeholder') ||
