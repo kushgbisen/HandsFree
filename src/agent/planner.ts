@@ -30,7 +30,12 @@ export async function plan(transcript: string, domSnapshot: string): Promise<Act
     if (t.includes('sign in') || t.includes('signin') || t.includes('log in')) {
       return [{ type: 'click', target: 'sign in' }];
     }
-    return [{ type: 'click', target: transcript.slice(0, 80) }];
+    // strip leading verb for better matching ("click X" -> "X")
+    let target = transcript.trim();
+    const lower = target.toLowerCase();
+    if (lower.startsWith('click ')) target = target.slice(6).trim();
+    else if (lower.startsWith('fill ')) target = target.slice(5).trim();
+    return [{ type: 'click', target: target.slice(0, 80) || transcript.slice(0, 80) }];
   }
 
   const res = await openai.chat.completions.create({
