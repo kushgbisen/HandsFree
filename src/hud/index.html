@@ -3,19 +3,126 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>HandsFree HUD</title>
+    <title>HandsFree</title>
     <style>
-      * { box-sizing: border-box; margin: 0; }
-      body { font: 13px system-ui; background: #0a0a0a; color: #fff; }
-      #hud { position: fixed; right: 16px; bottom: 16px; width: 320px; background: #171717; border: 1px solid #262626; border-radius: 12px; padding: 12px; }
-      .status { font-size: 11px; color: #a3a3a3; }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      body {
+        font: 13px system-ui;
+        background: #0a0a0a;
+        color: #eee;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+      }
+      #card {
+        width: 360px;
+        background: #171717;
+        border: 1px solid #262626;
+        border-radius: 16px;
+        padding: 16px;
+      }
+      #micBtn {
+        width: 100%;
+        padding: 12px;
+        border-radius: 10px;
+        border: 0;
+        background: #fff;
+        color: #000;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #micBtn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      #micBtn.listening {
+        background: #ef4444;
+        color: #fff;
+      }
+      #transcript {
+        margin-top: 12px;
+        min-height: 24px;
+        font-size: 14px;
+      }
+      #status {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #a3a3a3;
+      }
+      small {
+        display: block;
+        margin-top: 12px;
+        color: #737373;
+        font-size: 11px;
+      }
     </style>
   </head>
   <body>
-    <div id="hud">
-      <div class="status">Listening…</div>
+    <div id="card">
+      <button id="micBtn">🎤 Start mic</button>
       <div id="transcript"></div>
+      <div id="status">Idle — click mic and speak</div>
+      <small>Try: “click sign in”</small>
     </div>
-    <script type="module" src="./hud.ts"></script>
+    <script>
+      // client-side only — Web Speech API
+      const micBtn = document.getElementById('micBtn');
+      const transcriptEl = document.getElementById('transcript');
+      const statusEl = document.getElementById('status');
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      let rec = null;
+      let listening = false;
+      function setStatus(t) {
+        if (statusEl) statusEl.textContent = t;
+      }
+      if (!SR) {
+        setStatus('Web Speech API not supported — use Chrome');
+        micBtn.disabled = true;
+      } else {
+        rec = new SR();
+        rec.continuous = false;
+        rec.interimResults = true;
+        rec.lang = 'en-US';
+        rec.onstart = () => {
+          listening = true;
+          micBtn.textContent = '● Listening…';
+          micBtn.classList.add('listening');
+          setStatus('Listening…');
+        };
+        rec.onend = () => {
+          listening = false;
+          micBtn.textContent = '🎤 Start mic';
+          micBtn.classList.remove('listening');
+          setStatus('Idle — click mic and speak');
+        };
+        rec.onerror = (e) => setStatus('Error: ' + (e.error || 'unknown'));
+        rec.onresult = (e) => {
+          const r = e.results[e.results.length - 1];
+          const text = r[0].transcript;
+          transcriptEl.textContent = text;
+          transcriptEl.style.opacity = r.isFinal ? '1' : '0.6';
+          if (r.isFinal && text.trim()) {
+            setStatus('Heard: "' + text.trim() + '" — sending…');
+            fetch('/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: text.trim() }),
+            })
+              .then(async (res) => {
+                const d = await res.json().catch(() => ({}));
+                setStatus(d.message || 'Command sent');
+              })
+              .catch(() => setStatus('Failed to send command'));
+          }
+        };
+        micBtn.addEventListener('click', () => {
+          if (listening) rec.stop();
+          else rec.start();
+        });
+      }
+    </script>
   </body>
 </html>
