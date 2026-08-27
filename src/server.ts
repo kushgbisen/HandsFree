@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
-const testUrl = process.env.TEST_URL ?? 'https://the-internet.herokuapp.com/login';
+const testUrl = process.env.TEST_URL ?? `http://localhost:${port}/`;
 
 app.use(express.json());
 
@@ -198,16 +198,15 @@ app.post('/command', async (req, res) => {
   }
 });
 
-try {
-  console.log(`[server] launching browser → ${testUrl}`);
-  await initBrowser(testUrl);
-  await injectHud().catch((e) => console.warn('[hud] inject failed', e));
-  console.log('[server] browser ready');
-} catch (err) {
-  console.warn('[server] browser init failed (will retry on first /command):', err);
-}
-
-app.listen(port, () => {
+const server = app.listen(port, async () => {
   console.log(`[server] listening on http://localhost:${port}`);
   console.log(`[server] HUD at http://localhost:${port}/  — say "click sign in"`);
+  try {
+    console.log(`[server] launching browser → ${testUrl}`);
+    await initBrowser(testUrl);
+    await injectHud().catch((e) => console.warn('[hud] inject failed', e));
+    console.log('[server] browser ready');
+  } catch (err) {
+    console.warn('[server] browser init failed (will retry on first /command):', err);
+  }
 });

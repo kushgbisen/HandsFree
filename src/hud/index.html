@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>HandsFree</title>
+    <title>HandsFree — Voice Browser</title>
     <style>
       * {
         box-sizing: border-box;
@@ -13,26 +13,140 @@
         font: 13px system-ui;
         background: #0a0a0a;
         color: #eee;
-        display: grid;
-        place-items: center;
         min-height: 100vh;
+        display: flex;
+        flex-direction: column;
       }
-      #card {
-        width: 360px;
-        background: #171717;
-        border: 1px solid #262626;
-        border-radius: 16px;
+      header {
+        padding: 12px 16px;
+        border-bottom: 1px solid #262626;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      header h1 {
+        font-size: 14px;
+        font-weight: 700;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        background: #22c55e;
+        border-radius: 50%;
+        display: inline-block;
+      }
+      .dot.listening {
+        background: #ef4444;
+        animation: pulse 1s infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      #demo {
         padding: 16px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        background: #111;
+        border-bottom: 1px solid #262626;
+      }
+      #demo button,
+      #demo input {
+        padding: 8px 12px;
+        border-radius: 8px;
+        border: 1px solid #333;
+        background: #1a1a1a;
+        color: #fff;
+        font-size: 13px;
+      }
+      #demo button {
+        cursor: pointer;
+      }
+      #demo button:hover {
+        background: #222;
+      }
+      #demo input {
+        background: #0a0a0a;
+      }
+      #demo input:focus {
+        outline: 2px solid #facc15;
+      }
+      #chat {
+        flex: 1;
+        padding: 16px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 45vh;
+      }
+      .bubble {
+        max-width: 80%;
+        padding: 10px 12px;
+        border-radius: 14px;
+        font-size: 13px;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+      .bubble.user {
+        align-self: flex-end;
+        background: #fff;
+        color: #000;
+        border-bottom-right-radius: 4px;
+      }
+      .bubble.agent {
+        align-self: flex-start;
+        background: #1e1e1e;
+        border: 1px solid #2a2a2a;
+        color: #e5e5e5;
+        border-bottom-left-radius: 4px;
+      }
+      .bubble.agent .reason {
+        color: #facc15;
+        font-size: 11px;
+        margin-top: 4px;
+      }
+      .bubble.agent .verify {
+        color: #a3a3a3;
+        font-size: 11px;
+        margin-top: 4px;
+      }
+      .interim {
+        align-self: flex-end;
+        color: #737373;
+        font-style: italic;
+        font-size: 12px;
+        min-height: 16px;
+        padding: 0 4px;
+      }
+      #controls {
+        padding: 16px;
+        border-top: 1px solid #262626;
+        background: #111;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
       }
       #micBtn {
         width: 100%;
-        padding: 12px;
-        border-radius: 10px;
+        padding: 14px;
+        border-radius: 12px;
         border: 0;
         background: #fff;
         color: #000;
-        font-weight: 600;
+        font-weight: 700;
+        font-size: 14px;
         cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
       }
       #micBtn:disabled {
         opacity: 0.5;
@@ -42,87 +156,222 @@
         background: #ef4444;
         color: #fff;
       }
-      #transcript {
-        margin-top: 12px;
-        min-height: 24px;
-        font-size: 14px;
-      }
       #status {
-        margin-top: 8px;
         font-size: 11px;
         color: #a3a3a3;
+        text-align: center;
+        min-height: 14px;
       }
-      small {
-        display: block;
-        margin-top: 12px;
+      #liveTranscript {
+        min-height: 18px;
+        text-align: center;
+        font-size: 13px;
         color: #737373;
-        font-size: 11px;
+        font-style: italic;
+      }
+      #liveTranscript.final {
+        color: #fff;
+        font-style: normal;
+        font-weight: 500;
       }
     </style>
   </head>
   <body>
-    <div id="card">
-      <button id="micBtn">🎤 Start mic</button>
-      <div id="transcript"></div>
-      <div id="status">Idle — click mic and speak</div>
-      <small>Try: “click sign in”</small>
+    <header>
+      <span id="dot" class="dot"></span>
+      <h1>HandsFree</h1>
+      <span id="status" style="margin-left: auto">Idle — click mic and speak</span>
+    </header>
+
+    <div id="demo">
+      <button>Sign In</button>
+      <button>Sign Up</button>
+      <a
+        href="#"
+        style="
+          padding: 8px 12px;
+          background: #1a1a1a;
+          border-radius: 8px;
+          border: 1px solid #333;
+          color: #fff;
+          text-decoration: none;
+          display: inline-flex;
+          align-items: center;
+        "
+        >Learn more</a
+      >
+      <input placeholder="Email" style="flex: 1; min-width: 120px" />
     </div>
+
+    <div id="chat"></div>
+    <div id="liveTranscript"></div>
+
+    <div id="controls">
+      <button id="micBtn">🎤 Start mic — tap and say “click sign in”</button>
+      <small style="text-align: center; color: #525252"
+        >Works in Chrome • allow mic when prompted • try “click sign up” / “fill Email with
+        test@example.com”</small
+      >
+    </div>
+
     <script>
-      // client-side only — Web Speech API
       const micBtn = document.getElementById('micBtn');
-      const transcriptEl = document.getElementById('transcript');
+      const dot = document.getElementById('dot');
       const statusEl = document.getElementById('status');
+      const liveEl = document.getElementById('liveTranscript');
+      const chatEl = document.getElementById('chat');
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      function setStatus(t) {
+        statusEl.textContent = t;
+      }
+      function addBubble(text, who, extra) {
+        const div = document.createElement('div');
+        div.className = 'bubble ' + who;
+        div.textContent = text;
+        if (extra) {
+          const r = document.createElement('div');
+          r.className = who === 'agent' ? 'reason' : '';
+          r.textContent = extra;
+          div.appendChild(r);
+        }
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return div;
+      }
+      function addAgentBubble(msg, reason, verify) {
+        const div = document.createElement('div');
+        div.className = 'bubble agent';
+        div.innerHTML =
+          msg +
+          (reason ? `<div class="reason">→ ${reason}</div>` : '') +
+          (verify ? `<div class="verify">${verify}</div>` : '');
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
       let rec = null;
       let listening = false;
-      function setStatus(t) {
-        if (statusEl) statusEl.textContent = t;
-      }
+
       if (!SR) {
         setStatus('Web Speech API not supported — use Chrome');
         micBtn.disabled = true;
+        micBtn.textContent = 'Use Chrome for voice';
       } else {
         rec = new SR();
         rec.continuous = false;
         rec.interimResults = true;
         rec.lang = 'en-US';
+
         rec.onstart = () => {
           listening = true;
-          micBtn.textContent = '● Listening…';
+          micBtn.textContent = '● Listening… tap to stop';
           micBtn.classList.add('listening');
-          setStatus('Listening…');
+          dot.classList.add('listening');
+          setStatus('Listening… speak clearly');
+          liveEl.textContent = '...';
+          liveEl.className = '';
         };
         rec.onend = () => {
           listening = false;
-          micBtn.textContent = '🎤 Start mic';
+          micBtn.textContent = '🎤 Start mic — tap and say “click sign in”';
           micBtn.classList.remove('listening');
-          setStatus('Idle — click mic and speak');
+          dot.classList.remove('listening');
+          if (!liveEl.textContent || liveEl.textContent === '...')
+            setStatus('Idle — click mic and speak');
         };
-        rec.onerror = (e) => setStatus('Error: ' + (e.error || 'unknown'));
+        rec.onerror = (e) => {
+          setStatus('Mic error: ' + (e.error || 'unknown') + ' — try again');
+          liveEl.textContent = '';
+        };
         rec.onresult = (e) => {
           const r = e.results[e.results.length - 1];
           const text = r[0].transcript;
-          transcriptEl.textContent = text;
-          transcriptEl.style.opacity = r.isFinal ? '1' : '0.6';
+          // live words getting written as you speak
+          liveEl.textContent = text;
+          liveEl.className = r.isFinal ? 'final' : '';
           if (r.isFinal && text.trim()) {
-            setStatus('Heard: "' + text.trim() + '" — sending…');
+            const finalText = text.trim();
+            // show user bubble immediately (interpretation: what you said)
+            addBubble(finalText, 'user');
+            liveEl.textContent = '';
+            setStatus('Heard: "' + finalText + '" — thinking…');
+            // send to server (observe -> gemini 3.1 flash lite -> act -> verify)
             fetch('/command', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: text.trim() }),
+              body: JSON.stringify({ text: finalText }),
             })
               .then(async (res) => {
                 const d = await res.json().catch(() => ({}));
-                setStatus(d.message || 'Command sent');
+                const msg = d.message || 'done';
+                const plan = d.plan ? `id ${d.plan.index} — ${d.plan.reasoning}` : '';
+                const ver = d.verification
+                  ? (d.verification.success ? '✓ ' : '↻ ') + d.verification.reason
+                  : '';
+                if (d.interrupted) {
+                  addAgentBubble('⚡ Interrupted', '', '');
+                  setStatus('Interrupted');
+                } else if (d.candidate) {
+                  addAgentBubble(msg, plan, ver);
+                  setStatus(d.verification?.success ? 'Verified ✓' : 'Done');
+                } else {
+                  addAgentBubble(msg, '', '');
+                  setStatus('Done');
+                }
               })
-              .catch(() => setStatus('Failed to send command'));
+              .catch(() => {
+                setStatus('Failed to send — is server running?');
+                addAgentBubble('Failed to reach server', '', '');
+              });
           }
         };
         micBtn.addEventListener('click', () => {
           if (listening) rec.stop();
-          else rec.start();
+          else {
+            try {
+              rec.start();
+            } catch (e) {
+              setStatus('Mic busy — try again');
+            }
+          }
         });
       }
+
+      // also allow Enter to test without mic
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '/' && !listening) {
+          const t = prompt('Type command to test without mic:', 'click sign in');
+          if (t) {
+            addBubble(t, 'user');
+            fetch('/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: t }),
+            }).then(async (r) => {
+              const d = await r.json();
+              addAgentBubble(
+                d.message,
+                d.plan ? `id ${d.plan.index} — ${d.plan.reasoning}` : '',
+                d.verification ? d.verification.reason : '',
+              );
+            });
+          }
+        }
+      });
+
+      // demo buttons also work via voice, but clicking them directly shows they are real
+      document.querySelectorAll('#demo button, #demo a').forEach((el) => {
+        el.addEventListener('click', (e) => {
+          if (el.textContent.includes('Sign In')) {
+            location.hash = 'signed-in';
+            el.textContent = 'Signed in ✓';
+          } else if (el.textContent.includes('Sign Up')) {
+            location.hash = 'signed-up';
+            el.textContent = 'Signed up ✓';
+          }
+        });
+      });
     </script>
   </body>
 </html>
