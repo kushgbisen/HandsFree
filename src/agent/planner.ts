@@ -1,16 +1,11 @@
-import OpenAI from 'openai';
 import { z } from 'zod';
 import type { Candidate } from '../browser/observe.js';
-
-const openai = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY ?? 'dummy',
-  baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
-});
+import { callLLM, hasLLM } from './llm.js';
 
 export const PlanSchema = z.object({
   index: z.number().int().min(0).describe('id of chosen candidate from observed list'),
   reasoning: z.string().describe('brief why this candidate matches the intent'),
-  value: z.string().optional().describe('value to type if candidate is fillable'),
+  value: z.string().nullable().optional().describe('value to type if candidate is fillable'),
 });
 
 export type Plan = z.infer<typeof PlanSchema>;
@@ -32,8 +27,8 @@ No prose, no extra keys, only the JSON object.`;
 export async function plan(transcript: string, candidates: Candidate[]): Promise<Plan> {
   if (candidates.length === 0) throw new Error('planner: no candidates observed');
 
-  // fallback without API key — still chooses from observed list (no invented targets)
-  if (!process.env.DEEPSEEK_API_KEY) {
+  // fallback without any LLM key — still chooses from observed list (no invented targets)
+  if (!hasLLM()) {
     return fallbackChoose(transcript, candidates);
   }
 
@@ -43,20 +38,10 @@ export async function plan(transcript: string, candidates: Candidate[]): Promise
     2,
   );
 
-  const res = await openai.chat.completions.create({
-    model: 'deepseek-chat',
-    temperature: 0.1,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: `Transcript: "${transcript}"\n\nCandidates (fresh observation):\n${candidatesJson}`,
-      },
-    ],
-  });
-
-  const content = res.choices[0]?.message?.content ?? '{}';
+  const content = await callLLM(
+    SYSTEM_PROMPT,
+    `Transcript: "${transcript}"\n\nCandidates (fresh observation):\n${candidatesJson}`,
+  );
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -70,7 +55,12 @@ export async function plan(transcript: string, candidates: Candidate[]): Promise
       ? parsed
       : ((parsed as any)?.plan ?? (parsed as any)?.selected ?? parsed);
 
-  const plan = PlanSchema.parse(raw);
+  const parsedPlan = PlanSchema.parse(raw);
+  // normalize null -> undefined for downstream
+  const plan: Plan = {
+    ...parsedPlan,
+    value: parsedPlan.value ?? undefined,
+  } as Plan;
 
   if (plan.index < 0 || plan.index >= candidates.length) {
     throw new Error(`planner: index ${plan.index} out of range (0-${candidates.length - 1})`);

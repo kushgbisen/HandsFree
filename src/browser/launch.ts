@@ -8,7 +8,11 @@ export let context: any;
 // visible browser (not headless), navigates to test site
 export async function initBrowser(targetUrl = 'https://example.com') {
   const wantHeadless = process.env.HEADLESS === 'true';
-  const hasRealKey = !!(process.env.OPENAI_API_KEY ?? process.env.DEEPSEEK_API_KEY);
+  const aistudioKey =
+    process.env.AISTUDIO_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+  // stagehand only supports openai/google models directly — deepseek/openrouter use playwright fallback for act
+  const hasRealKey = !!(openaiKey ?? aistudioKey);
 
   // container/CI: use playwright directly (no Chrome dependency, headless)
   // local dev: try localBrowser for visible window, fallback to playwright
@@ -27,13 +31,10 @@ export async function initBrowser(targetUrl = 'https://example.com') {
   // stagehand needs a real LLM key — skip if none (use playwright directly)
   if (hasRealKey) {
     try {
-      stagehand = await Stagehand.create({
-        browser,
-        model: {
-          modelName: 'openai/gpt-4o-mini',
-          apiKey: process.env.OPENAI_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? 'dummy',
-        },
-      } as never);
+      const model = openaiKey
+        ? { modelName: 'openai/gpt-4o-mini' as const, apiKey: openaiKey }
+        : { modelName: 'google/gemini-2.5-flash' as const, apiKey: aistudioKey! };
+      stagehand = await Stagehand.create({ browser, model } as never);
     } catch (e) {
       console.warn('[browser] stagehand init failed, falling back to playwright:', e);
       stagehand = null;
