@@ -45,6 +45,20 @@ app.post('/command', async (req, res) => {
   let text: string | undefined = req.body?.text?.trim();
   if (!text) return res.status(400).json({ message: 'missing text' });
 
+  // auto-recover if browser died (e.g., first launch failed)
+  try {
+    const p = getPage();
+    if (p.isClosed()) throw new Error('page closed');
+  } catch {
+    try {
+      console.log('[server] re-launching browser...');
+      await initBrowser(testUrl);
+      await injectHud().catch(() => {});
+    } catch (e) {
+      console.warn('[server] re-launch failed', e);
+    }
+  }
+
   // live interrupt — any new voice can preempt current queue
   if (isInterrupt(text)) {
     const newIntent = extractNewIntent(text);

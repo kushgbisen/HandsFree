@@ -1,4 +1,4 @@
-import { Stagehand, localBrowser } from '@browserbasehq/stagehand';
+import { Stagehand } from '@browserbasehq/stagehand';
 
 export let stagehand: any;
 export let page: any;
@@ -14,16 +14,15 @@ export async function initBrowser(targetUrl = 'https://example.com') {
   // stagehand only supports openai/google models directly — deepseek/openrouter use playwright fallback for act
   const hasRealKey = !!(openaiKey ?? aistudioKey);
 
-  // container/CI: use playwright directly (no Chrome dependency, headless)
-  // local dev: try localBrowser for visible window, fallback to playwright
+  // always use playwright chromium — visible via Chrome channel when not headless
+  // (localBrowser returns a StagehandBrowser without newContext, so we use playwright directly)
+  const { chromium } = await import('playwright');
   if (wantHeadless) {
-    const { chromium } = await import('playwright');
     browser = await chromium.launch({ headless: true });
   } else {
     try {
-      browser = await localBrowser.launch({ headless: false });
+      browser = await chromium.launch({ headless: false, channel: 'chrome' });
     } catch {
-      const { chromium } = await import('playwright');
       browser = await chromium.launch({ headless: false });
     }
   }
