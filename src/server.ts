@@ -3,6 +3,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initBrowser, getPage, getBrowser } from './browser/launch.js';
+import { observe } from './browser/observe.js';
 import { plan } from './agent/planner.js';
 import { execute } from './agent/loop.js';
 
@@ -15,11 +16,9 @@ const testUrl = process.env.TEST_URL ?? 'https://the-internet.herokuapp.com/logi
 
 app.use(express.json());
 
-// serve HUD (index.html + static)
 const hudDir = path.join(__dirname, 'hud');
 app.use(express.static(hudDir));
 app.get('/', (_req, res) => res.sendFile(path.join(hudDir, 'index.html')));
-
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 app.post('/command', async (req, res) => {
@@ -27,34 +26,35 @@ app.post('/command', async (req, res) => {
   if (!text) return res.status(400).json({ message: 'missing text' });
 
   try {
-    // 1. DOM snapshot — prefer stagehand.observe, fallback to page.content
-    let snapshot = '';
-    try {
-      const page = getPage();
-      const browser = getBrowser();
-      console.log(
-        `[command] snapshot — page closed=${page.isClosed()} browser connected=${browser.isConnected()} contexts=${browser.contexts().length}`,
-      );
-      snapshot = await page.content();
-      // keep it small for LLM
-      snapshot = snapshot.slice(0, 12000);
-    } catch (e) {
-      console.warn('[command] snapshot failed', e);
-      snapshot = `page url: ${testUrl}`;
+    // 1. fresh observation — no persisted knowledge, every page is unknown
+    const page = getPage();
+    const browser = getBrowser();
+    console.log(
+      `[command] "${text}" — page closed=${page.isClosed()} browser connected=${browser.isConnected()} url=${page.url()}`,
+    );
+
+    const candidates = await observe();
+    console.log(`[command] observed ${candidates.length} candidates`);
+
+    if (candidates.length === 0) {
+      return res.status(500).json({ message: 'no candidates observed' });
     }
 
-    // 2. plan
-    const actions = await plan(text, snapshot);
-    if (actions.length === 0) {
-      return res.json({ message: 'no actions planned', actions });
-    }
+    // 2. plan — may only choose from what was just observed
+    const chosen = await plan(text, candidates);
+    const candidate = candidates[chosen.index];
+    console.log(
+      `[command] plan chose id=${chosen.index} -> ${candidate.description} reasoning="${chosen.reasoning}"`,
+    );
 
-    // 3. execute
-    await execute(actions);
+    // 3. execute — direct on exact observed element
+    await execute(chosen, candidates);
 
     res.json({
-      message: `executed ${actions.length} action(s): ${actions.map((a) => `${a.type} "${a.target}"`).join(', ')}`,
-      actions,
+      message: `executed id ${chosen.index} -> ${candidate.description}`,
+      plan: chosen,
+      candidate,
+      candidates,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -63,14 +63,12 @@ app.post('/command', async (req, res) => {
   }
 });
 
-// init browser first, then listen
 try {
   console.log(`[server] launching browser → ${testUrl}`);
   await initBrowser(testUrl);
   console.log('[server] browser ready');
 } catch (err) {
   console.warn('[server] browser init failed (will retry on first /command):', err);
-  // don't exit — let server start so HUD still works
 }
 
 app.listen(port, () => {

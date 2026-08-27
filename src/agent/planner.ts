@@ -1,42 +1,47 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
+import type { Candidate } from '../browser/observe.js';
 
 const openai = new OpenAI({
   apiKey: process.env.DEEPSEEK_API_KEY ?? 'dummy',
   baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
 });
 
-export const ActionSchema = z.array(
-  z.object({
-    type: z.enum(['click', 'fill']),
-    target: z.string().describe('natural language description of element to act on'),
-    value: z.string().optional().describe('value to fill — required when type is fill'),
-  }),
-);
+export const PlanSchema = z.object({
+  index: z.number().int().min(0).describe('id of chosen candidate from observed list'),
+  reasoning: z.string().describe('brief why this candidate matches the intent'),
+  value: z.string().optional().describe('value to type if candidate is fillable'),
+});
 
-export type Action = z.infer<typeof ActionSchema>[number];
+export type Plan = z.infer<typeof PlanSchema>;
 
-const SYSTEM_PROMPT = `You are HandsFree planner. Given user transcript and a DOM snapshot, return a JSON array of actions.
-Each action: { "type": "click" | "fill", "target": "<short description>", "value"?: "<for fill>" }.
-Only use "click" and "fill". Prefer "click" for buttons/links. Keep target short (2-5 words).
-Return ONLY valid JSON — either an array or {"actions": [...] }. No prose.`;
+const SYSTEM_PROMPT = `You are HandsFree planner. You will be given a user voice transcript and a numbered list of currently observed actionable candidates. Each candidate has id, description, and selector and was confirmed to exist on the live page right now.
 
-export async function plan(transcript: string, domSnapshot: string): Promise<Action[]> {
-  const trimmedSnapshot = domSnapshot.slice(0, 8000);
+Rules:
+- You may ONLY choose from the provided candidates. Never invent a target, never describe an element not in the list, never return an index outside the list.
+- Respond with JSON: {"index": <id>, "reasoning": "<brief>", "value": "<optional for fill>"}
+- If none matches perfectly, choose the closest and explain uncertainty in reasoning but still return an index.
+- Keep reasoning short (1 sentence).
 
-  // fallback without API key — lets Hour 1-3 work offline
+No prose, no extra keys, only the JSON object.`;
+
+/**
+ * Core principle: planner may only choose from what observe() just returned.
+ * It never describes, guesses, or invents a target.
+ */
+export async function plan(transcript: string, candidates: Candidate[]): Promise<Plan> {
+  if (candidates.length === 0) throw new Error('planner: no candidates observed');
+
+  // fallback without API key — still chooses from observed list (no invented targets)
   if (!process.env.DEEPSEEK_API_KEY) {
-    const t = transcript.toLowerCase();
-    if (t.includes('sign in') || t.includes('signin') || t.includes('log in')) {
-      return [{ type: 'click', target: 'sign in' }];
-    }
-    // strip leading verb for better matching ("click X" -> "X")
-    let target = transcript.trim();
-    const lower = target.toLowerCase();
-    if (lower.startsWith('click ')) target = target.slice(6).trim();
-    else if (lower.startsWith('fill ')) target = target.slice(5).trim();
-    return [{ type: 'click', target: target.slice(0, 80) || transcript.slice(0, 80) }];
+    return fallbackChoose(transcript, candidates);
   }
+
+  const candidatesJson = JSON.stringify(
+    candidates.map((c) => ({ id: c.id, description: c.description, method: c.method })),
+    null,
+    2,
+  );
 
   const res = await openai.chat.completions.create({
     model: 'deepseek-chat',
@@ -46,12 +51,12 @@ export async function plan(transcript: string, domSnapshot: string): Promise<Act
       { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
-        content: `Transcript: "${transcript}"\n\nDOM snapshot (truncated):\n${trimmedSnapshot}`,
+        content: `Transcript: "${transcript}"\n\nCandidates (fresh observation):\n${candidatesJson}`,
       },
     ],
   });
 
-  const content = res.choices[0]?.message?.content ?? '[]';
+  const content = res.choices[0]?.message?.content ?? '{}';
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -59,11 +64,50 @@ export async function plan(transcript: string, domSnapshot: string): Promise<Act
     throw new Error(`planner: invalid JSON from model: ${content.slice(0, 200)}`);
   }
 
-  const actionsRaw = Array.isArray(parsed)
-    ? parsed
-    : ((parsed as { actions?: unknown; plan?: unknown }).actions ??
-      (parsed as { plan?: unknown }).plan ??
-      parsed);
+  // handle wrapped shapes: { index: 3 } or { plan: { index: 3 } } or { selected: 3 }
+  const raw =
+    (parsed as any)?.index !== undefined
+      ? parsed
+      : ((parsed as any)?.plan ?? (parsed as any)?.selected ?? parsed);
 
-  return ActionSchema.parse(actionsRaw);
+  const plan = PlanSchema.parse(raw);
+
+  if (plan.index < 0 || plan.index >= candidates.length) {
+    throw new Error(`planner: index ${plan.index} out of range (0-${candidates.length - 1})`);
+  }
+
+  return plan;
+}
+
+function fallbackChoose(transcript: string, candidates: Candidate[]): Plan {
+  const t = transcript.toLowerCase();
+  const words = t
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9]/g, ''))
+    .filter(
+      (w) =>
+        w.length > 1 && !['click', 'fill', 'type', 'the', 'and', 'for', 'with', 'into'].includes(w),
+    );
+
+  let bestIdx = 0;
+  let bestScore = -1;
+
+  candidates.forEach((c, idx) => {
+    const desc = c.description.toLowerCase();
+    let score = 0;
+    for (const w of words) {
+      if (desc.includes(w)) score += 2;
+    }
+    // small bonus if transcript phrase appears in description
+    if (words.length > 0 && desc.includes(words[0])) score += 1;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = idx;
+    }
+  });
+
+  return {
+    index: bestIdx,
+    reasoning: `fallback: chose id ${bestIdx} "${candidates[bestIdx].description}" (score ${bestScore})`,
+  };
 }
