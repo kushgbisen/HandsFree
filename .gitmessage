@@ -1,0 +1,40 @@
+# <type>(<scope>): <subject>
+# |<---- 72 chars max ---->|
+#
+# Types (STRICT — no other types allowed):
+#   feat     — new feature (MINOR bump)
+#   fix      — bug fix (PATCH bump)
+#   docs     — documentation only
+#   style    — formatting, no logic change (prettier, etc.)
+#   refactor — code change, no feat/fix
+#   perf     — performance improvement
+#   test     — add/correct tests
+#   build    — build system or external deps
+#   ci       — CI configuration
+#   chore    — maintenance, no prod change
+#   revert   — revert prior commit
+#
+# Scopes (STRICT — use one of these):
+#   agent, browser, hud, server, stt, planner, verifier, loop,
+#   highlight, ws, config, deps, docs, repo, ci, release
+#
+# Rules (enforced by commitlint):
+#   - type is required, lowercase
+#   - scope is required, lowercase (enables changelog per module)
+#   - subject: imperative, lowercase start, no period, <=72 chars
+#   - body: wrap at 100 chars, explain WHAT + WHY (not HOW)
+#   - footer: BREAKING CHANGE: <description> or Closes #<issue>
+#
+# Examples:
+#   feat(hud): add interrupt button with abort controller
+#   fix(planner): handle zod parse failure with single retry
+#   docs(repo): define git discipline and branching model
+#   chore(deps): bump playwright to 1.44.0
+#   feat(agent)!: change ActionPlan schema (BREAKING CHANGE)
+#
+# BREAKING CHANGE example:
+#   feat(planner)!: switch ActionPlan reasoning to structured object
+#
+#   BREAKING CHANGE: ActionPlan.reasoning is now { summary, steps }.
+#
+# ------------------ END TEMPLATE ------------------

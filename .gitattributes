@@ -1,0 +1,15 @@
+# Enforce LF line endings
+* text=auto eol=lf
+
+# Explicit binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.drawio binary
+*.excalidraw binary
+
+# Linguist overrides
+*.md linguist-documentation=true
