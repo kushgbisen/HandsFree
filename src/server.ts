@@ -7,6 +7,7 @@ import { observe, type Candidate } from './browser/observe.js';
 import { plan, type Plan } from './agent/planner.js';
 import { execute } from './agent/loop.js';
 import { verify } from './agent/verifier.js';
+import { injectHud, updateHud } from './browser/hud.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +33,13 @@ app.post('/command', async (req, res) => {
     console.log(
       `[command] "${text}" — page closed=${page.isClosed()} browser connected=${browser.isConnected()} url=${page.url()}`,
     );
+    await updateHud({
+      transcript: `"${text}"`,
+      status: 'Observing...',
+      plan: '',
+      verification: '',
+      showStop: true,
+    }).catch(() => {});
 
     let beforeUrl = page.url();
     let lastPlan: Plan | null = null;
@@ -46,6 +54,10 @@ app.post('/command', async (req, res) => {
       console.log(
         `[command] observed ${candidates.length} candidates (try ${retries + 1}/${maxRetries + 1})`,
       );
+      await updateHud({
+        plan: `Found ${candidates.length} candidates`,
+        status: 'Planning...',
+      }).catch(() => {});
       if (candidates.length === 0) throw new Error('no candidates observed');
 
       const chosen = await plan(text, candidates);
@@ -53,8 +65,13 @@ app.post('/command', async (req, res) => {
       console.log(
         `[command] plan chose id=${chosen.index} -> ${candidate.description} reasoning="${chosen.reasoning}"`,
       );
+      await updateHud({
+        plan: `→ ${candidate.description} — ${chosen.reasoning}`,
+        status: 'Acting...',
+      }).catch(() => {});
 
       await execute(chosen, candidates);
+      await updateHud({ status: 'Verifying...' }).catch(() => {});
 
       // small settle before verify
       await new Promise((r) => setTimeout(r, 400));
@@ -69,6 +86,11 @@ app.post('/command', async (req, res) => {
       lastCandidate = candidate;
 
       if (result.success) {
+        await updateHud({
+          verification: `✓ ${result.reason}`,
+          status: 'Verified',
+          showStop: false,
+        }).catch(() => {});
         return res.json({
           message: `✓ verified id ${chosen.index} -> ${candidate.description} — ${result.reason}`,
           plan: chosen,
@@ -79,6 +101,11 @@ app.post('/command', async (req, res) => {
       }
 
       if (retries === maxRetries) {
+        await updateHud({
+          verification: `Need help: ${result.reason}`,
+          status: 'Need help',
+          showStop: false,
+        }).catch(() => {});
         return res.json({
           message: `need help — click to take over (after ${retries + 1} tries): ${result.reason}`,
           plan: chosen,
@@ -88,6 +115,10 @@ app.post('/command', async (req, res) => {
         });
       }
 
+      await updateHud({
+        verification: `↻ ${result.reason}`,
+        status: `Retrying ${retries + 1}/${maxRetries}`,
+      }).catch(() => {});
       console.log(`[verify] ↻ retrying (${retries + 1}/${maxRetries}) — ${result.reason}`);
       beforeUrl = afterUrl;
       retries++;
@@ -110,6 +141,7 @@ app.post('/command', async (req, res) => {
 try {
   console.log(`[server] launching browser → ${testUrl}`);
   await initBrowser(testUrl);
+  await injectHud().catch((e) => console.warn('[hud] inject failed', e));
   console.log('[server] browser ready');
 } catch (err) {
   console.warn('[server] browser init failed (will retry on first /command):', err);

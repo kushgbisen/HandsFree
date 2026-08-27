@@ -56,6 +56,8 @@ export async function observe(): Promise<Candidate[]> {
         'button, a[href], input, select, textarea, [role="button"], [role="link"], [onclick]',
       ),
     ).filter((el) => {
+      // never treat HUD itself as actionable
+      if ((el as HTMLElement).closest('#hf-hud')) return false;
       const rect = (el as HTMLElement).getBoundingClientRect();
       const style = window.getComputedStyle(el as HTMLElement);
       return (
