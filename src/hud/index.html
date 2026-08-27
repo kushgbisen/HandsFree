@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HandsFree HUD</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+      body { font: 13px system-ui; background: #0a0a0a; color: #fff; }
+      #hud { position: fixed; right: 16px; bottom: 16px; width: 320px; background: #171717; border: 1px solid #262626; border-radius: 12px; padding: 12px; }
+      .status { font-size: 11px; color: #a3a3a3; }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div class="status">Listening…</div>
+      <div id="transcript"></div>
+    </div>
+    <script type="module" src="./hud.ts"></script>
+  </body>
+</html>
