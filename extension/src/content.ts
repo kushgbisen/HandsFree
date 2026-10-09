@@ -169,6 +169,28 @@ let pageRec: any = null;
 let pageListening = false;
 let pageStarting = false;
 
+/** Pre-flight mic check: names the exact blocker instead of failing silent. */
+async function diagnoseMic(): Promise<string | null> {
+  if (!PageSR) return 'Voice needs Chrome desktop — type instead';
+  try {
+    const devices = await navigator.mediaDevices?.enumerateDevices?.();
+    if (devices && !devices.some((d) => d.kind === 'audioinput')) {
+      return 'No microphone found on this device — plug one in or type instead';
+    }
+  } catch {
+    // enumerate unavailable — continue to permission check
+  }
+  try {
+    const st = await navigator.permissions.query({ name: 'microphone' });
+    if (st.state === 'denied') {
+      return 'Microphone is Blocked for this site — click the icon left of the address bar → Site settings → Microphone → Allow, then tap mic again';
+    }
+  } catch {
+    // permissions API unavailable — continue to start attempt
+  }
+  return null;
+}
+
 function toggleMic(): void {
   if (!PageSR) {
     setPillStatus('Voice needs Chrome desktop — type instead');
@@ -199,15 +221,22 @@ function toggleMic(): void {
       pageListening = false;
       setMic('idle');
       const err = e.error || 'unknown';
-      setPillStatus(
-        err === 'not-allowed' || err === 'service-not-allowed'
-          ? 'Mic blocked — allow microphone access in the address bar, then tap again'
-          : err === 'no-speech'
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        // re-diagnose for the precise fix (blocked vs no-device vs API)
+        diagnoseMic().then((m) =>
+          setPillStatus(
+            m ?? 'Mic blocked — allow microphone access in the address bar, then tap again',
+          ),
+        );
+      } else {
+        setPillStatus(
+          err === 'no-speech'
             ? 'Nothing heard — speak closer or type instead'
             : err === 'audio-capture'
               ? 'No microphone found — plug one in or type instead'
               : 'Mic issue (' + err + ') — try again or type instead',
-      );
+        );
+      }
     };
     pageRec.onresult = (e: any) => {
       const r = e.results[e.results.length - 1];
@@ -219,16 +248,38 @@ function toggleMic(): void {
       }
     };
   }
-  try {
-    if (pageListening || pageStarting) pageRec.stop();
-    else {
-      pageStarting = true;
-      pageRec.start();
+  if (pageListening || pageStarting) {
+    try {
+      pageRec.stop();
+    } catch {
+      pageStarting = false;
     }
-  } catch {
-    pageStarting = false;
-    setPillStatus('Mic busy — try again');
+    return;
   }
+  // fresh start: diagnose first (fast, local), then start while the tap is fresh
+  pageStarting = true;
+  diagnoseMic().then((problem) => {
+    if (problem) {
+      pageStarting = false;
+      setPillStatus(problem);
+      return;
+    }
+    try {
+      pageRec.start();
+    } catch {
+      pageStarting = false;
+      setPillStatus('Mic busy — try again');
+      return;
+    }
+    // permission bubble pending: Chrome waits for the user, we must not look dead
+    setTimeout(() => {
+      if (pageStarting && !pageListening) {
+        setPillStatus(
+          'Waiting for mic permission — allow it in the browser prompt, or type instead',
+        );
+      }
+    }, 2500);
+  });
 }
 
 function setMic(mode: 'idle' | 'listening' | 'working'): void {
