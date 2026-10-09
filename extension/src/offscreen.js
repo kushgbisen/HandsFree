@@ -9,9 +9,22 @@ port.onDisconnect.addListener(() =>
 const SR = window.webkitSpeechRecognition || window.SpeechRecognition;
 let rec = null;
 let listening = false;
+function say(text) {
+  chrome.runtime.sendMessage({ type: 'hud', update: { status: text } }).catch(() => {});
+}
+function startRec(r) {
+  try {
+    r.start();
+  } catch (e) {
+    say('Mic failed: ' + (e instanceof Error ? e.message : String(e)));
+  }
+}
 function ensureRec() {
   if (rec) return rec;
-  if (!SR) return null;
+  if (!SR) {
+    say('Voice needs Chrome desktop — type in the pill instead');
+    return null;
+  }
   rec = new SR();
   rec.continuous = false;
   rec.interimResults = true;
@@ -28,17 +41,28 @@ function ensureRec() {
       .sendMessage({ type: 'hud', update: { status: 'Idle', showMic: false } })
       .catch(() => {});
   };
-  rec.onerror = (e) =>
-    chrome.runtime
-      .sendMessage({ type: 'hud', update: { status: 'Mic error: ' + (e.error || 'unknown') } })
-      .catch(() => {});
+  rec.onerror = (e) => {
+    const err = e.error || 'unknown';
+    const help =
+      err === 'not-allowed' || err === 'service-not-allowed'
+        ? ' — mic blocked for the extension. Open the pill on a normal tab, click the mic, and Allow when asked. Or type instead.'
+        : err === 'no-speech'
+          ? ' — nothing heard. Speak closer or type instead.'
+          : err === 'audio-capture'
+            ? ' — no microphone found. Plug one in or type instead.'
+            : ' — try again or type instead.';
+    say('Mic error: ' + err + help);
+  };
   rec.onresult = (e) => {
     const r = e.results[e.results.length - 1];
     const text = r[0].transcript;
     const isFinal = r.isFinal;
-    // show live words
-    chrome.runtime.sendMessage({ type: 'hud', update: { transcript: text } }).catch(() => {});
-    if (isFinal && text.trim()) {
+    // live words getting written as you speak — interim only, final handled by background bubble
+    if (!isFinal) {
+      chrome.runtime
+        .sendMessage({ type: 'hud', update: { transcript: text, isFinal: false } })
+        .catch(() => {});
+    } else if (text.trim()) {
       chrome.runtime.sendMessage({ type: 'speech', text: text.trim(), isFinal: true });
     }
   };
@@ -49,10 +73,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     const r = ensureRec();
     if (!r) return;
     if (listening) r.stop();
-    else r.start();
+    else startRec(r);
   }
   if (msg.type === 'startMic') {
     const r = ensureRec();
-    if (r) r.start();
+    if (r) startRec(r);
   }
 });

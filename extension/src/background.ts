@@ -4,7 +4,13 @@
  */
 import { callLLM } from './llm.js';
 
-type Candidate = { id: number; selector: string; description: string; method?: string };
+type Candidate = {
+  id: number;
+  selector: string;
+  description: string;
+  method?: string;
+  role?: string;
+};
 type Plan = { index: number; reasoning: string; value?: string };
 
 const queue: Array<() => Promise<void>> = [];
@@ -41,41 +47,116 @@ async function updateHud(tabId: number, update: any): Promise<void> {
   chrome.tabs.sendMessage(tabId, { type: 'hud', update }).catch(() => {});
 }
 
+async function scrollPage(tabId: number): Promise<void> {
+  await chrome.tabs.sendMessage(tabId, { type: 'scroll' }).catch(() => {});
+}
+
+// --- intent ranking: cheap keyword scoring so the LLM only sees the top 15 ---
+const INTENT_STOPWORDS = new Set([
+  'click',
+  'press',
+  'tap',
+  'hit',
+  'fill',
+  'type',
+  'enter',
+  'put',
+  'set',
+  'the',
+  'a',
+  'an',
+  'and',
+  'for',
+  'with',
+  'into',
+  'in',
+  'on',
+  'to',
+  'please',
+  'this',
+  'that',
+  'it',
+  'my',
+  'me',
+  'go',
+  'open',
+]);
+const VERB_ONLY = new Set(['click', 'press', 'tap', 'hit', 'fill', 'type', 'open', 'go']);
+
+function intentWords(transcript: string): string[] {
+  return transcript
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9]/g, ''))
+    .filter((w) => w.length > 1 && !INTENT_STOPWORDS.has(w));
+}
+
+/** Fill-like intents ("comment X", "search Y") target boxes, not the words themselves. */
+function isFillIntent(transcript: string): boolean {
+  if (/omit value|no text to type/i.test(transcript)) return false;
+  return /comment|fill|type|search|write|say|enter|post|publish/i.test(transcript);
+}
+
+function scoreCandidate(words: string[], fillIntent: boolean, c: Candidate): number {
+  const desc = c.description.toLowerCase();
+  let s = 0;
+  if (fillIntent && c.method === 'fill') s += 3;
+  for (const w of words) {
+    if (desc.includes(`"${w}`)) s += 3;
+    else if (desc.includes(w)) s += 2;
+  }
+  if (words.length > 0 && desc.includes(words.join(' '))) s += 2;
+  return s;
+}
+
+function rankCandidates(
+  transcript: string,
+  candidates: Candidate[],
+): { ranked: Candidate[]; best: number } {
+  const words = intentWords(transcript);
+  const fillIntent = isFillIntent(transcript);
+  const scored = candidates.map((c) => ({ c, s: scoreCandidate(words, fillIntent, c) }));
+  scored.sort((a, b) => b.s - a.s);
+  return { ranked: scored.map((x) => x.c), best: scored.length ? scored[0].s : 0 };
+}
+
 async function planWithLLM(transcript: string, candidates: Candidate[]): Promise<Plan> {
-  const system = `You are HandsFree planner. Choose ONLY from candidates. Return {"index":<id>,"reasoning":"<brief>","value":"<optional>"}`;
+  // pre-ranked shortlist: model sees top 15, best first — index maps back below
+  const { ranked } = rankCandidates(transcript, candidates);
+  const shortlist = ranked.slice(0, 15).map((c, i) => ({ ...c, id: i }));
+  const system = `You are HandsFree planner. Choose ONLY from candidates (pre-ranked by relevance, best first). Return {"index":<id>,"reasoning":"<brief>","value":"<optional text to type>"}
+Rules for "value": when the intent contains words to write, put them in value and pick the input/box to write into.
+- "comment nice video" on a comment box -> value "nice video"
+- "fill Email with test@example.com" -> value "test@example.com"
+- "search for cats" on a search box -> value "cats"
+- Pure clicks ("click sign in", "post it") -> omit value.
+Never invent a target or index outside the list. One sentence of reasoning.`;
   const user = `Transcript: "${transcript}"\nCandidates:\n${JSON.stringify(
-    candidates.map((c) => ({ id: c.id, description: c.description, method: c.method })),
+    shortlist.map((c) => ({ id: c.id, description: c.description, method: c.method })),
     null,
     2,
   )}`;
   const text = await callLLM(system, user);
   const parsed = JSON.parse(text);
   const raw = parsed.index !== undefined ? parsed : (parsed.plan ?? parsed);
-  if (raw.index < 0 || raw.index >= candidates.length)
+  if (raw.index < 0 || raw.index >= shortlist.length)
     throw new Error(`index ${raw.index} out of range`);
-  return { index: raw.index, reasoning: raw.reasoning ?? '', value: raw.value ?? undefined };
+  // ranked[] holds original refs whose .id is the original position —
+  // map the model's shortlist pick back so callers index the full array.
+  return {
+    index: ranked[raw.index].id,
+    reasoning: raw.reasoning ?? '',
+    value: raw.value ?? undefined,
+  };
 }
 
 function fallbackPlan(transcript: string, candidates: Candidate[]): Plan {
-  const words = transcript
-    .toLowerCase()
-    .split(/\s+/)
-    .map((w) => w.replace(/[^a-z0-9]/g, ''))
-    .filter(
-      (w) =>
-        w.length > 1 && !['click', 'fill', 'type', 'the', 'and', 'for', 'with', 'into'].includes(w),
-    );
-  let best = 0,
-    bestScore = -1;
-  candidates.forEach((c, i) => {
-    let s = 0;
-    for (const w of words) if (c.description.toLowerCase().includes(w)) s += 2;
-    if (s > bestScore) {
-      bestScore = s;
-      best = i;
-    }
-  });
-  return { index: best, reasoning: `fallback: chose ${candidates[best].description}` };
+  const { ranked, best } = rankCandidates(transcript, candidates);
+  const verb = Array.from(VERB_ONLY).find((v) => transcript.toLowerCase().includes(v)) ?? 'act on';
+  return {
+    index: ranked[0].id,
+    reasoning: `fallback: ${verb} ${ranked[0].description} (score ${best})`,
+  };
 }
 
 async function verify(
@@ -99,7 +180,7 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
   const tabId = await getActiveTabId();
   if (!tabId) throw new Error('no active tab');
 
-  await updateHud(tabId, { transcript: `"${transcript}"`, status: 'Observing...' });
+  await updateHud(tabId, { transcript, isFinal: true, status: 'Observing...' });
   let beforeUrl = '';
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -108,8 +189,25 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
   let retries = 0;
   while (retries <= 2) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const candidates = await observe(tabId);
+    let candidates = await observe(tabId);
     if (!candidates.length) throw new Error('no candidates');
+
+    // scroll-to-discover: nothing relevant in view? look further down (max 3).
+    let best = rankCandidates(transcript, candidates).best;
+    let scrolls = 0;
+    while (best < 3 && scrolls < 3) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      await scrollPage(tabId);
+      await new Promise((r) => setTimeout(r, 300));
+      const more = await observe(tabId);
+      if (!more.length) break;
+      const rescored = rankCandidates(transcript, more).best;
+      if (rescored <= best) break;
+      candidates = more;
+      best = rescored;
+      scrolls++;
+    }
+    if (scrolls > 0) console.log(`[command] discover: ${scrolls} scrolls, best score ${best}`);
     await updateHud(tabId, { plan: `Found ${candidates.length}`, status: 'Planning...' });
     let plan: Plan;
     try {
@@ -125,6 +223,30 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
     await highlight(tabId, candidate.selector);
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     await act(tabId, candidate, plan.value);
+
+    // chained submit: "comment nice video" fills AND posts in one command.
+    // After a fill, look once for the submit/post button and click it.
+    const filled = plan.value !== undefined || candidate.method === 'fill';
+    if (filled && /comment|post|send|search|submit|publish/i.test(transcript)) {
+      try {
+        const again = await observe(tabId);
+        const submit = await planWithLLM(
+          `click the submit/post/search button to complete: "${transcript}" (no text to type, omit value)`,
+          again,
+        );
+        const submitTarget = again[submit.index];
+        await updateHud(tabId, {
+          plan: `→ ${submitTarget.description} — posting…`,
+          status: 'Acting...',
+          working: true,
+        });
+        await highlight(tabId, submitTarget.selector);
+        if (!signal.aborted) await act(tabId, submitTarget);
+      } catch (e) {
+        console.warn('[command] chained submit skipped', e);
+      }
+    }
+
     await updateHud(tabId, { status: 'Verifying...' });
     await new Promise((r) => setTimeout(r, 400));
     const afterCandidates = await observe(tabId);
@@ -159,19 +281,35 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
   }
 }
 
-// offscreen for mic
-async function ensureOffscreen() {
-  const has = await chrome.offscreen.hasDocument?.();
-  if (!has)
-    await chrome.offscreen.createDocument({
-      url: 'src/offscreen.html',
-      reasons: ['AUDIO_PLAYBACK'] as any,
-      justification: 'Mic for HandsFree',
-    });
+// offscreen for mic — every failure is reported to the pill, never silent
+async function ensureOffscreen(tabId: number | null) {
+  try {
+    if (!chrome.offscreen) throw new Error('offscreen API missing — update Chrome');
+    const has = await chrome.offscreen.hasDocument();
+    if (!has) {
+      await chrome.offscreen.createDocument({
+        url: 'src/offscreen.html',
+        reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'] as any,
+        justification: 'Microphone for HandsFree voice commands',
+      });
+      // let the document boot before messaging it
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (tabId) await updateHud(tabId, { status: `Mic setup failed: ${msg}` });
+    throw e;
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
+    if (msg.type === 'hud') {
+      const tabId = await getActiveTabId();
+      if (tabId) await updateHud(tabId, msg.update);
+      sendResponse({ ok: true });
+      return;
+    }
     if (msg.type === 'speech' && msg.isFinal && msg.text) {
       const text: string = msg.text.trim();
       if (!text) return;
@@ -220,8 +358,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: true });
     }
     if (msg.type === 'startMic') {
-      await ensureOffscreen();
+      const tabId = await getActiveTabId();
+      try {
+        await ensureOffscreen(tabId);
+      } catch {
+        sendResponse({ ok: false });
+        return;
+      }
+      // offscreen confirms by flipping the pill to Listening… (onstart)
+      // or reports the exact error (onerror) — no silent hangs anymore
       chrome.runtime.sendMessage({ type: 'offscreen-start' });
+      if (tabId) await updateHud(tabId, { status: 'Starting mic…' });
       sendResponse({ ok: true });
     }
   })();

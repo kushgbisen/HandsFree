@@ -1,40 +1,97 @@
 /**
- * HandsFree — content script (runs on every page via manifest host_permissions, not activeTab)
- * Holds keepalive Port, injects HUD, provides observe/act/highlight
+ * HandsFree — content script. Runs on YOUR tabs (youtube.com included),
+ * not a robot window. Clean card + observe/act/highlight.
  */
 const HUD_ID = 'hf-hud';
 const STYLE_ID = 'hf-hud-style';
 const HIGHLIGHT_CLASS = 'hf-highlight';
 
-const port = chrome.runtime.connect({ name: 'keepalive' });
-port.onDisconnect.addListener(() =>
+const MIC_SVG = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`;
+const STOP_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>`;
+
+const hfPort = chrome.runtime.connect({ name: 'keepalive' });
+hfPort.onDisconnect.addListener(() =>
   setTimeout(() => chrome.runtime.connect({ name: 'keepalive' }), 1000),
 );
 
-// HUD
 function injectHud(): void {
   if (document.getElementById(HUD_ID)) return;
   const style = document.createElement('style');
   style.id = STYLE_ID;
-  style.textContent = `.${HIGHLIGHT_CLASS}{outline:3px solid #facc15 !important;outline-offset:2px !important;background:rgba(250,204,21,0.15) !important;animation:hf-pulse 1s infinite !important}@keyframes hf-pulse{0%,100%{outline-color:#facc15}50%{outline-color:#fde68a}} #${HUD_ID}{position:fixed;right:16px;bottom:16px;width:320px;background:#111;color:#fff;z-index:2147483647;padding:12px;border-radius:12px;font:12px system-ui;box-shadow:0 4px 24px rgba(0,0,0,0.4);border:1px solid #262626}`;
+  style.textContent = `
+    .${HIGHLIGHT_CLASS}{outline:3px solid #facc15 !important;outline-offset:2px !important;background:rgba(250,204,21,0.15) !important;animation:hf-pulse 1s ease-in-out infinite !important}
+    @keyframes hf-pulse{0%,100%{outline-color:#facc15}50%{outline-color:#fde68a}}
+    #${HUD_ID}{position:fixed;right:20px;bottom:20px;width:296px;background:rgba(18,18,20,0.86);backdrop-filter:blur(20px) saturate(1.4);-webkit-backdrop-filter:blur(20px) saturate(1.4);color:#f4f4f5;z-index:2147483647;border-radius:20px;padding:14px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 40px rgba(0,0,0,0.45);font:13px/1.45 system-ui,-apple-system,sans-serif}
+    #${HUD_ID} #hf-top{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+    #${HUD_ID} #hf-dot{width:7px;height:7px;border-radius:50%;background:#34c759;flex:none}
+    #${HUD_ID} #hf-dot.busy{background:#facc15;animation:hf-blink 1s infinite}
+    @keyframes hf-blink{50%{opacity:0.35}}
+    #${HUD_ID} #hf-brand{font-size:10px;font-weight:600;letter-spacing:0.14em;color:#8e8e93}
+    #${HUD_ID} #hf-min{margin-left:auto;width:22px;height:22px;border-radius:50%;border:0;background:transparent;color:#8e8e93;font-size:14px;line-height:1;cursor:pointer}
+    #${HUD_ID} #hf-min:hover{background:rgba(255,255,255,0.08);color:#fff}
+    #${HUD_ID} #hf-status{color:#e4e4e7;min-height:20px;margin-bottom:10px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    #${HUD_ID} #hf-row{display:flex;gap:8px;align-items:center}
+    #${HUD_ID} #hf-mic{width:38px;height:38px;flex:none;border-radius:50%;border:0;background:#f4f4f5;color:#111;display:grid;place-items:center;cursor:pointer;transition:transform 0.12s ease,background 0.15s ease}
+    #${HUD_ID} #hf-mic:hover{transform:scale(1.05)}
+    #${HUD_ID} #hf-mic.listening{background:#ef4444;color:#fff;animation:hf-ring 1s infinite}
+    @keyframes hf-ring{0%{box-shadow:0 0 0 0 rgba(239,68,68,0.5)}100%{box-shadow:0 0 0 10px rgba(239,68,68,0)}}
+    #${HUD_ID} #hf-mic.working{background:#facc15;color:#111}
+    #${HUD_ID} #hf-type{flex:1;min-width:0;height:38px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);border-radius:12px;color:#fff;font-size:13px;padding:0 12px;outline:none}
+    #${HUD_ID} #hf-type::placeholder{color:#636366}
+    #${HUD_ID} #hf-type:focus{border-color:#facc15;box-shadow:0 0 0 3px rgba(250,204,21,0.18)}
+    #${HUD_ID}.collapsed #hf-body{display:none}
+    #${HUD_ID}.collapsed{width:auto;padding:10px}
+    #${HUD_ID}.collapsed #hf-top{margin-bottom:0}
+    @media (prefers-color-scheme: light){
+      #${HUD_ID}{background:rgba(255,255,255,0.88);color:#18181b;border-color:rgba(0,0,0,0.08);box-shadow:0 12px 40px rgba(0,0,0,0.16)}
+      #${HUD_ID} #hf-status{color:#3f3f46}
+      #${HUD_ID} #hf-min:hover{background:rgba(0,0,0,0.06);color:#000}
+      #${HUD_ID} #hf-type{background:rgba(0,0,0,0.04);border-color:rgba(0,0,0,0.08);color:#18181b}
+      #${HUD_ID} #hf-type::placeholder{color:#a1a1aa}
+    }
+  `;
   document.head.appendChild(style);
   const hud = document.createElement('div');
   hud.id = HUD_ID;
   hud.innerHTML = `
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-      <span id="hf-dot" style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;"></span>
-      <span style="font-weight:700;">HandsFree</span>
-      <span id="hf-status" style="margin-left:auto;font-size:11px;color:#a3a3a3;">Idle</span>
-      <button id="hf-mic" style="margin-left:8px;padding:6px 10px;border-radius:8px;border:0;background:#fff;color:#000;font-weight:700;cursor:pointer;">🎤</button>
+    <div id="hf-top">
+      <span id="hf-dot"></span>
+      <span id="hf-brand">HANDSFREE</span>
+      <button id="hf-min" title="Minimize">–</button>
     </div>
-    <div id="hf-transcript" style="min-height:18px;color:#e5e5e5;word-break:break-word;"></div>
-    <div id="hf-plan" style="font-size:11px;color:#facc15;min-height:14px;"></div>
-    <div id="hf-verification" style="font-size:11px;color:#a3a3a3;min-height:14px;"></div>
+    <div id="hf-body">
+      <div id="hf-status">Tap mic or type below</div>
+      <div id="hf-row">
+        <button id="hf-mic" title="Tap to speak">${MIC_SVG}</button>
+        <input id="hf-type" placeholder="Try “comment nice video”" aria-label="Type command" autocomplete="off" />
+      </div>
+    </div>
   `;
   (document.body || document.documentElement).appendChild(hud);
-  document
-    .getElementById('hf-mic')
-    ?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'startMic' }));
+
+  const mic = document.getElementById('hf-mic') as HTMLButtonElement;
+  const mode: 'idle' | 'listening' | 'working' = 'idle';
+  (window as unknown as { __hfMode: string }).__hfMode = mode;
+  mic.addEventListener('click', () => {
+    const m = (window as unknown as { __hfMode: string }).__hfMode;
+    if (m === 'working') {
+      chrome.runtime.sendMessage({ type: 'speech', text: 'stop', isFinal: true });
+    } else {
+      chrome.runtime.sendMessage({ type: 'startMic' });
+    }
+  });
+  document.getElementById('hf-min')?.addEventListener('click', () => {
+    hud.classList.toggle('collapsed');
+  });
+  const typeEl = document.getElementById('hf-type') as HTMLInputElement | null;
+  typeEl?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const text = typeEl.value.trim();
+      if (!text) return;
+      typeEl.value = '';
+      chrome.runtime.sendMessage({ type: 'speech', text, isFinal: true });
+    }
+  });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectHud);
 else injectHud();
@@ -42,41 +99,145 @@ new MutationObserver(() => {
   if (!document.getElementById(HUD_ID) && document.body) injectHud();
 }).observe(document.documentElement, { childList: true, subtree: true });
 
-export type Candidate = { id: number; selector: string; description: string; method?: string };
+function setMic(mode: 'idle' | 'listening' | 'working'): void {
+  (window as unknown as { __hfMode: string }).__hfMode = mode;
+  const mic = document.getElementById('hf-mic');
+  if (!mic) return;
+  mic.classList.toggle('listening', mode === 'listening');
+  mic.classList.toggle('working', mode === 'working');
+  mic.innerHTML = mode === 'working' ? STOP_SVG : MIC_SVG;
+  mic.title = mode === 'working' ? 'Stop' : 'Tap to speak';
+}
 
+// NOTE: no import/export here — content scripts load as classic scripts,
+// one module token kills the whole file (no pill). Keep this file dependency-free.
+type Candidate = {
+  id: number;
+  selector: string;
+  description: string;
+  method?: string;
+  role?: string;
+};
+
+// Broad net — the role filter below decides what is truly actionable.
+const OBSERVE_SELECTOR =
+  'button, a[href], input, select, textarea, [contenteditable="true"], [contenteditable=""], [role], [onclick], summary, [tabindex]:not([tabindex="-1"])';
+
+// Roles a voice command can meaningfully act on. Everything else is noise.
+const ACTIONABLE_ROLES = new Set([
+  'button',
+  'link',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'checkbox',
+  'radio',
+  'switch',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'tab',
+  'option',
+]);
+
+function computedRole(el: Element): string {
+  const explicit = el.getAttribute('role');
+  if (explicit) return explicit.split(' ')[0].toLowerCase();
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'button') return 'button';
+  if (tag === 'a' && el.hasAttribute('href')) return 'link';
+  if (tag === 'summary') return 'button';
+  if (tag === 'select') return 'combobox';
+  if (tag === 'textarea') return 'textbox';
+  if (tag === 'input') {
+    const t = (el.getAttribute('type') || 'text').toLowerCase();
+    if (t === 'hidden' || t === 'submit' || t === 'button') return t === 'hidden' ? '' : 'button';
+    if (t === 'checkbox') return 'checkbox';
+    if (t === 'radio') return 'radio';
+    if (t === 'search') return 'searchbox';
+    if (['text', 'email', 'password', 'tel', 'url', 'number'].includes(t)) return 'textbox';
+    return '';
+  }
+  if ((el as HTMLElement).isContentEditable) return 'textbox';
+  return '';
+}
+
+/** Accessible-name computation: labelledby > label > aria-label > text > placeholder. */
+function accessibleName(el: Element): string {
+  const labelledby = el.getAttribute('aria-labelledby');
+  if (labelledby) {
+    const parts = labelledby
+      .split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent?.trim() ?? '')
+      .filter(Boolean);
+    if (parts.length) return parts.join(' ');
+  }
+  const id = el.id;
+  if (id) {
+    const label = document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim();
+    if (label) return label;
+    const wrapping = (el as HTMLElement).closest('label')?.textContent?.trim();
+    if (wrapping) return wrapping;
+  }
+  return (
+    el.getAttribute('aria-label')?.trim() ||
+    (el.textContent?.trim() ?? '') ||
+    el.getAttribute('placeholder')?.trim() ||
+    el.getAttribute('alt')?.trim() ||
+    el.getAttribute('title')?.trim() ||
+    el.getAttribute('value')?.trim() ||
+    ''
+  );
+}
+
+function isVisible(el: Element): boolean {
+  const html = el as HTMLElement;
+  const r = html.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return false;
+  const s = getComputedStyle(html);
+  if (s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') return false;
+  if ((html as HTMLInputElement).type === 'hidden') return false;
+  return true;
+}
+
+/**
+ * ARIA-first observation: every actionable control as role + accessible name —
+ * the language LLMs natively understand. Scans deep (cap 200); the background
+ * ranks by intent and sends only the top 15 to the model.
+ */
 async function observe(): Promise<Candidate[]> {
   document.querySelectorAll('[data-hf-id]').forEach((el) => el.removeAttribute('data-hf-id'));
-  const els = Array.from(
-    document.querySelectorAll(
-      'button, a[href], input, select, textarea, [role="button"], [role="link"], [onclick]',
-    ),
-  ).filter((el) => {
+  const els = Array.from(document.querySelectorAll(OBSERVE_SELECTOR)).filter((el) => {
     if ((el as HTMLElement).closest(`#${HUD_ID}`)) return false;
-    const r = (el as HTMLElement).getBoundingClientRect();
-    const s = getComputedStyle(el as HTMLElement);
-    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    if (!ACTIONABLE_ROLES.has(computedRole(el))) return false;
+    if ((el as HTMLElement).hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true')
+      return false;
+    return isVisible(el);
   });
-  return els.slice(0, 40).map((el, i) => {
+
+  return els.slice(0, 200).map((el, i) => {
     (el as HTMLElement).setAttribute('data-hf-id', String(i));
-    const isInput = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
-    const live = isInput ? (el as HTMLInputElement).value?.trim() : '';
-    const text = (
-      live ||
-      el.textContent?.trim() ||
-      el.getAttribute('aria-label') ||
-      el.getAttribute('placeholder') ||
-      el.tagName
-    )
-      .replace(/\s+/g, ' ')
-      .slice(0, 80);
-    const tag = el.tagName.toLowerCase();
+    const role = computedRole(el);
+    const isFill = role === 'textbox' || role === 'searchbox' || role === 'combobox';
+    const live =
+      el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+        ? (el as HTMLInputElement).value?.trim()
+        : (el as HTMLElement).isContentEditable
+          ? ((el as HTMLElement).textContent?.trim() ?? '')
+          : '';
+    const name = (live || accessibleName(el)).replace(/\s+/g, ' ').slice(0, 80) || role;
     return {
       id: i,
-      description: `${tag}: "${text}"`,
+      description: `${role} "${name}"`,
       selector: `[data-hf-id="${i}"]`,
-      method: tag === 'input' || tag === 'textarea' || tag === 'select' ? 'fill' : 'click',
+      method: isFill ? 'fill' : 'click',
+      role,
     };
   });
+}
+
+async function scrollPage(): Promise<void> {
+  window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'instant' as ScrollBehavior });
 }
 
 async function highlight(selector: string): Promise<void> {
@@ -94,9 +255,26 @@ async function highlight(selector: string): Promise<void> {
 async function act(candidate: Candidate, value?: string): Promise<void> {
   const el = document.querySelector(candidate.selector) as HTMLElement | null;
   if (!el) throw new Error('candidate not found');
-  if (value !== undefined || candidate.method === 'fill') {
-    (el as HTMLInputElement).value = value ?? '';
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+  const needsFill = value !== undefined || candidate.method === 'fill';
+  if (needsFill) {
+    const text = value ?? '';
+    (el as HTMLElement).focus?.();
+    if ((el as HTMLElement).isContentEditable) {
+      // YouTube comment boxes, rich editors: no .value — write text + input events
+      el.textContent = text;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      el.value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (el instanceof HTMLSelectElement) {
+      el.value = text;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      el.textContent = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   } else {
     (el as HTMLElement).click();
   }
@@ -108,6 +286,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'observe') {
       const candidates = await observe();
       sendResponse({ candidates });
+    } else if (msg.type === 'scroll') {
+      await scrollPage();
+      sendResponse({ ok: true, y: window.scrollY });
     } else if (msg.type === 'highlight') {
       await highlight(msg.selector);
       sendResponse({ ok: true });
@@ -116,18 +297,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: true });
     } else if (msg.type === 'hud') {
       const u = msg.update;
-      const tr = document.getElementById('hf-transcript');
-      const pl = document.getElementById('hf-plan');
       const st = document.getElementById('hf-status');
-      const ve = document.getElementById('hf-verification');
-      if (u.transcript !== undefined && tr) tr.textContent = u.transcript;
-      if (u.plan !== undefined && pl) pl.textContent = u.plan;
-      if (u.status !== undefined && st) st.textContent = u.status;
-      if (u.verification !== undefined && ve) ve.textContent = u.verification;
-      if (u.showMic !== undefined) {
-        const dot = document.getElementById('hf-dot');
-        if (dot) dot.style.background = u.showMic ? '#ef4444' : '#22c55e';
+      const dot = document.getElementById('hf-dot');
+      if (u.transcript !== undefined && st) {
+        st.textContent = u.isFinal ? `Heard: "${u.transcript}"` : u.transcript || 'Listening…';
       }
+      if (u.plan !== undefined && st && u.plan) st.textContent = u.plan;
+      if (u.status !== undefined && st) st.textContent = u.status;
+      if (u.verification !== undefined && st && u.verification) st.textContent = u.verification;
+      const working = u.working ?? (u.showStop || (u.status && !/idle|need help/i.test(u.status)));
+      if (dot) dot.classList.toggle('busy', !!working || !!u.showMic);
+      if (u.showMic) setMic('listening');
+      else if (working) setMic('working');
+      else setMic('idle');
       sendResponse({ ok: true });
     }
   })();
