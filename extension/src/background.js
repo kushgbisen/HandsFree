@@ -428,32 +428,17 @@ async function runCommandInner(transcript, signal) {
     retries++;
   }
 }
-// offscreen for mic — every failure is reported to the pill, never silent
-async function ensureOffscreen(tabId) {
-  try {
-    if (!chrome.offscreen) throw new Error('offscreen API missing — update Chrome');
-    const has = await chrome.offscreen.hasDocument();
-    if (!has) {
-      await chrome.offscreen.createDocument({
-        url: 'src/offscreen.html',
-        reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'],
-        justification: 'Microphone for HandsFree voice commands',
-      });
-      // let the document boot before messaging it
-      await new Promise((r) => setTimeout(r, 400));
-    }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (tabId) await updateHud(tabId, { status: `Mic setup failed: ${msg}` });
-    throw e;
-  }
-}
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg.type === 'hud') {
       const tabId = await getActiveTabId();
       if (tabId) await updateHud(tabId, msg.update);
       sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === 'hello') {
+      const data = await chrome.storage.local.get(['apiKey', 'AISTUDIO_API_KEY']).catch(() => ({}));
+      sendResponse({ hasKey: !!(data.apiKey || data.AISTUDIO_API_KEY) });
       return;
     }
     if (msg.type === 'speech' && msg.isFinal && msg.text) {
@@ -515,24 +500,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       sendResponse({ ok: true });
     }
-    if (msg.type === 'startMic') {
-      const tabId = await getActiveTabId();
-      try {
-        await ensureOffscreen(tabId);
-      } catch {
-        sendResponse({ ok: false });
-        return;
-      }
-      // offscreen confirms by flipping the pill to Listening… (onstart)
-      // or reports the exact error (onerror) — no silent hangs anymore
-      chrome.runtime.sendMessage({ type: 'offscreen-start' });
-      if (tabId) await updateHud(tabId, { status: 'Starting mic…' });
-      sendResponse({ ok: true });
-    }
   })();
   return true;
-});
-// keep offscreen alive
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'keepalive') port.onDisconnect.addListener(() => {});
 });

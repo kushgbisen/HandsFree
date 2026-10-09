@@ -109,6 +109,18 @@ function injectHud(): void {
       chrome.runtime.sendMessage({ type: 'speech', text, isFinal: true });
     }
   });
+  // first-run nudge: no key saved and pill still idle → point at the toolbar
+  chrome.runtime
+    .sendMessage({ type: 'hello' })
+    .then((res: any) => {
+      if (res && !res.hasKey) {
+        const st = document.getElementById('hf-status');
+        if (st && st.textContent?.startsWith('Tap mic')) {
+          setPillStatus('Set your key via the toolbar icon — basic mode until then');
+        }
+      }
+    })
+    .catch(() => {});
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectHud);
 else injectHud();
@@ -396,9 +408,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'observe') {
       const candidates = await observe();
       sendResponse({ candidates });
-    } else if (msg.type === 'startMic') {
-      toggleMic();
-      sendResponse({ ok: true });
     } else if (msg.type === 'scroll') {
       await scrollPage();
       sendResponse({ ok: true, y: window.scrollY });

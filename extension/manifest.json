@@ -3,7 +3,13 @@
   "name": "HandsFree",
   "version": "0.1.0",
   "description": "Voice-controlled browser automation — index-based, site-agnostic",
-  "permissions": ["storage", "offscreen", "scripting"],
+  "icons": {
+    "16": "src/icons/icon16.png",
+    "32": "src/icons/icon32.png",
+    "48": "src/icons/icon48.png",
+    "128": "src/icons/icon128.png"
+  },
+  "permissions": ["storage", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background.js",
@@ -19,6 +25,7 @@
   ],
   "action": {
     "default_popup": "src/popup.html",
-    "default_title": "HandsFree"
+    "default_title": "HandsFree",
+    "default_icon": "src/icons/icon32.png"
   }
 }
