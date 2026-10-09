@@ -6,6 +6,9 @@ import { callLLM, streamLLM } from './llm.js';
 const queue = [];
 let running = false;
 let currentAbort = new AbortController();
+// the controller of the command actually executing — "stop" aborts THIS,
+// not whatever controller was created last
+let runningController = null;
 // keepalive
 const ports = new Set();
 chrome.runtime.onConnect.addListener((port) => {
@@ -93,9 +96,9 @@ function scoreCandidate(words, fillIntent, c) {
   if (words.length > 0 && desc.includes(words.join(' '))) s += 2;
   return s;
 }
-function rankCandidates(transcript, candidates) {
+function rankCandidates(transcript, candidates, noFillBonus = false) {
   const words = intentWords(transcript);
-  const fillIntent = isFillIntent(transcript);
+  const fillIntent = !noFillBonus && isFillIntent(transcript);
   const scored = candidates.map((c) => ({ c, s: scoreCandidate(words, fillIntent, c) }));
   scored.sort((a, b) => b.s - a.s);
   return { ranked: scored.map((x) => x.c), best: scored.length ? scored[0].s : 0 };
@@ -174,17 +177,88 @@ function fallbackPlan(transcript, candidates) {
     value: extractValue(transcript),
   };
 }
-async function verify(transcript, plan, beforeUrl, afterUrl, afterCandidates) {
+function withTimeout(p, ms) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timed out')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+function fallbackVerify(plan, beforeUrl, afterUrl, afterCandidates) {
   if (beforeUrl !== afterUrl) return { success: true, reason: `URL changed` };
   if (plan.value) {
     const v = plan.value.toLowerCase();
     if (afterCandidates.some((c) => c.description.toLowerCase().includes(v)))
       return { success: true, reason: `value "${plan.value}" found` };
+    return { success: false, reason: `typed text not visible after act` };
   }
-  // for click, assume success if still has candidates (conservative)
-  return { success: true, reason: 'assume click performed' };
+  if (afterCandidates.length > 0) {
+    return { success: true, reason: 'action performed, page stable' };
+  }
+  return { success: false, reason: 'page lost all controls after act' };
+}
+/** Real judge: compares before/after snapshots. Heuristics only on LLM failure. */
+async function verify(
+  transcript,
+  plan,
+  acted,
+  beforeUrl,
+  afterUrl,
+  beforeCandidates,
+  afterCandidates,
+) {
+  const short = (cs) => cs.slice(0, 30).map((c) => ({ id: c.id, description: c.description }));
+  const system = `You are HandsFree verifier. Decide if the user's intent was achieved. Return {"success":true/false,"reason":"<brief>"}.
+- Click that navigates: success if the URL or content changed toward the intent.
+- Click with no navigation expected: success if it was performed and no error is visible — do NOT fail just because the element still exists.
+- Fill/type: success only if the typed value (or its effect) is visible afterwards.
+- If an error, login wall, or captcha appeared: success false.
+- When genuinely unsure, return success true — the user can interrupt.`;
+  const user =
+    `Intent: "${transcript}"\nAction taken: ${acted.method} on ${acted.description}` +
+    (plan.value ? ` with value "${plan.value}"` : '') +
+    `\nBefore URL: ${beforeUrl}\nAfter URL: ${afterUrl}` +
+    `\nBefore controls:\n${JSON.stringify(short(beforeCandidates))}` +
+    `\nAfter controls:\n${JSON.stringify(short(afterCandidates))}`;
+  try {
+    const text = await withTimeout(callLLM(system, user), 15000);
+    const parsed = JSON.parse(text);
+    const raw = parsed.success !== undefined ? parsed : (parsed.verdict ?? parsed);
+    if (typeof raw.success !== 'boolean' || typeof raw.reason !== 'string')
+      throw new Error('bad verifier shape');
+    return { success: raw.success, reason: raw.reason };
+  } catch {
+    return fallbackVerify(plan, beforeUrl, afterUrl, afterCandidates);
+  }
 }
 async function runCommand(transcript, signal) {
+  try {
+    await runCommandInner(transcript, signal);
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[command] failed:', msg);
+    const tabId = await getActiveTabId();
+    if (tabId) {
+      await updateHud(tabId, {
+        status: 'Failed',
+        verification: `Failed: ${msg} — try rephrasing`,
+        thought: msg,
+        thinking: false,
+        showStop: false,
+      });
+    }
+  }
+}
+async function runCommandInner(transcript, signal) {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const tabId = activeTab?.id ?? null;
   if (!tabId) throw new Error('no active tab');
@@ -237,6 +311,7 @@ async function runCommand(transcript, signal) {
       plan = fallbackPlan(transcript, candidates);
     }
     const candidate = candidates[plan.index];
+    const preCandidates = candidates;
     await updateHud(tabId, {
       plan: `→ ${candidate.description} — ${plan.reasoning}`,
       status: 'Acting...',
@@ -255,7 +330,7 @@ async function runCommand(transcript, signal) {
         let submitted = false;
         if (!/comment|post|publish/i.test(transcript)) {
           await pressEnter(tabId, candidate.selector);
-          await new Promise((r) => setTimeout(r, 900));
+          await new Promise((r) => setTimeout(r, 700));
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
           try {
             const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -273,15 +348,29 @@ async function runCommand(transcript, signal) {
         }
         if (!submitted) {
           const again = await observe(tabId);
-          const submit = await planWithLLM(
-            `click the submit/post/search button to complete: "${transcript}" (no text to type, omit value)`,
+          // heuristic first: buttons name themselves — no LLM roundtrip needed.
+          // LLM only as fallback when nothing scores like a submit button.
+          const submitRanked = rankCandidates(
+            'submit post comment publish search send button',
             again,
-            pageCtx,
+            true,
           );
-          const submitTarget = again[submit.index];
+          let submitTarget = submitRanked.best >= 4 ? submitRanked.ranked[0] : null;
+          let submitReason = submitTarget ? `button match (score ${submitRanked.best})` : '';
+          if (!submitTarget) {
+            const submit = await planWithLLM(
+              `click the submit/post/search button to complete: "${transcript}" (no text to type, omit value)`,
+              again,
+              pageCtx,
+            );
+            submitTarget = again[submit.index];
+            submitReason = submit.reasoning;
+          }
           await updateHud(tabId, {
-            plan: `→ ${submitTarget.description} — posting…`,
+            plan: `→ ${submitTarget.description} — ${submitReason || 'posting…'}`,
             status: 'Acting...',
+            thought: submitReason || 'posting…',
+            thinking: false,
             working: true,
           });
           await highlight(tabId, submitTarget.selector);
@@ -303,7 +392,15 @@ async function runCommand(transcript, signal) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       afterUrl = tab.url ?? beforeUrl;
     } catch {}
-    const result = await verify(transcript, plan, beforeUrl, afterUrl, afterCandidates);
+    const result = await verify(
+      transcript,
+      plan,
+      candidate,
+      beforeUrl,
+      afterUrl,
+      preCandidates,
+      afterCandidates,
+    );
     if (result.success) {
       await updateHud(tabId, {
         verification: `✓ ${result.reason}`,
@@ -372,7 +469,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               .replace(/\b(stop|cancel|wait|hold on|abort)\b/gi, '')
               .replace(/[—\-:,]+/g, ' ')
               .trim();
-        currentAbort.abort();
+        (runningController ?? currentAbort).abort();
         queue.length = 0;
         // fresh controller — the old signal stays aborted forever
         currentAbort = new AbortController();
@@ -389,23 +486,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
         // enqueue new intent on the fresh signal, not the aborted one
-        queue.push(() => runCommand(newIntent, freshSignal).catch(() => {}));
+        queue.push({
+          run: () => runCommand(newIntent, freshSignal).catch(() => {}),
+          controller: currentAbort,
+        });
       } else {
         currentAbort = new AbortController();
         const signal = currentAbort.signal;
-        queue.push(() =>
-          runCommand(text, signal).catch((e) => {
-            if (e.name !== 'AbortError') console.error(e);
-          }),
-        );
+        const controller = currentAbort;
+        // errors already surface on the pill via runCommand's boundary — stay silent here
+        queue.push({ run: () => runCommand(text, signal).catch(() => {}), controller });
       }
       if (!running) {
         running = true;
-        while (queue.length) {
-          const fn = queue.shift();
-          await fn();
+        try {
+          while (queue.length) {
+            const item = queue.shift();
+            runningController = item.controller;
+            try {
+              await item.run();
+            } finally {
+              runningController = null;
+            }
+          }
+        } finally {
+          running = false;
         }
-        running = false;
       }
       sendResponse({ ok: true });
     }
