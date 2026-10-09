@@ -12,16 +12,27 @@ import {
   observeTab,
   pressEnterKey,
   scrollOnce,
-  withTimeout,
   type Candidate,
 } from './tools.js';
 import { updateHud } from './hud.js';
-import { ACTOR_SYSTEM, validateStep, type NormStep } from './prompts.js';
+import { ACTOR_SYSTEM, extractJson, validateStep, type NormStep } from './prompts.js';
 import { callLLM, hasLLM, streamLLM } from './llm.js';
 
 const MAX_STEPS = 5;
 const SHORTLIST = 15;
 const MODEL_TIMEOUT = 12000;
+const FALLBACK_TIMEOUT = 8000;
+const MAX_ACT_FAILURES = 2;
+
+const fmt = (ms: number): string => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
+
+/** A timeout that really aborts the request — no orphan streams, plus user abort. */
+function stepSignal(user: AbortSignal, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  const anyOf = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyOf === 'function') return anyOf.call(AbortSignal, [user, timeout]);
+  return timeout;
+}
 
 // --- ranking: prompt-size compression only, never a decision ---
 const STOPWORDS = new Set([
@@ -98,6 +109,45 @@ function normalizeNavigateTarget(target: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent(t)}`;
 }
 
+function searchQueryOf(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.searchParams.get('q') ?? u.searchParams.get('query') ?? u.searchParams.get('s');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Local verification: URL evidence we can check without a model call.
+ * Fires only for results this session produced (acted=true), so a
+ * stale or unrelated query string can never fake a success.
+ */
+function localVerify(goal: string, url: string, startUrl: string, acted: boolean): string | null {
+  if (!url || !acted) return null;
+  const q = searchQueryOf(url);
+  if (q && /search|look up|google/i.test(goal)) {
+    const words = wordsOf(goal).filter((w) => w !== 'search');
+    if (words.some((w) => q.toLowerCase().includes(w))) {
+      return `results for "${q}" — verified by the results URL`;
+    }
+    return null;
+  }
+  if (/^(open|go to|visit|take me to)\b/i.test(goal.trim()) && url !== startUrl && !q) {
+    const host = (() => {
+      try {
+        return new URL(url).hostname.replace(/^www\./, '');
+      } catch {
+        return '';
+      }
+    })();
+    if (wordsOf(goal).some((w) => host.includes(w))) {
+      return `opened ${host} — verified by the address bar`;
+    }
+  }
+  return null;
+}
+
 async function modelStep(
   goal: string,
   url: string,
@@ -106,7 +156,8 @@ async function modelStep(
   lastError: string,
   shown: Candidate[],
   tabId: number,
-): Promise<any> {
+  signal: AbortSignal,
+): Promise<unknown | null> {
   const user =
     `Goal: "${goal}"\nPage: ${title} <${url}>\n` +
     `History:\n${history.length ? history.map((h) => `- ${h}`).join('\n') : '(none yet)'}\n` +
@@ -124,15 +175,20 @@ async function modelStep(
       updateHud(tabId, { thought: delta.slice(0, 140), thinking: true }).catch(() => {});
     }
   };
+  let text: string;
   try {
-    const text = await withTimeout(streamLLM(ACTOR_SYSTEM, user, onDelta), MODEL_TIMEOUT);
+    text = await streamLLM(ACTOR_SYSTEM, user, onDelta, stepSignal(signal, MODEL_TIMEOUT));
+  } catch (e) {
+    // user abort → propagate. HTTP status (auth/quota/model) → fail fast:
+    // a non-stream retry hits the same wall and only doubles the wait.
+    if (signal.aborted || (e as { status?: number }).status) throw e;
+    // transport trouble (timeout, dropped stream) → one non-stream retry
     await updateHud(tabId, { thinking: false }).catch(() => {});
-    return JSON.parse(text);
-  } catch {
-    await updateHud(tabId, { thinking: false }).catch(() => {});
-    const text = await withTimeout(callLLM(ACTOR_SYSTEM, user), 10000);
-    return JSON.parse(text);
+    text = await callLLM(ACTOR_SYSTEM, user, stepSignal(signal, FALLBACK_TIMEOUT));
   }
+  await updateHud(tabId, { thinking: false }).catch(() => {});
+  // null = unparseable → the caller feeds the model a precise correction
+  return extractJson(text);
 }
 
 /** No-key degraded mode: one crude act, then done. A rule, not intelligence. */
@@ -150,6 +206,7 @@ async function fallbackStep(goal: string, tabId: number, shortlist: Candidate[])
     status: 'Done',
     thinking: false,
     showStop: false,
+    working: false,
   });
 }
 
@@ -185,53 +242,60 @@ async function execAction(
     return;
   }
   const target = shortlist[action.index];
-  if (action.tool === 'click') {
-    await updateHud(tabId, {
-      plan: `→ ${target.description} — ${step.thought}`,
-      status: `${tag}Acting...`,
-      thought: step.thought,
-      thinking: false,
-    });
-    await highlightTab(tabId, target.selector);
-    throwIfAborted(signal);
-    await actOn(tabId, target);
-    history.push(`clicked ${target.description}`);
-    return;
-  }
-  if (action.tool === 'fill') {
-    await updateHud(tabId, {
-      plan: `→ ${target.description} — ${step.thought}`,
-      status: `${tag}Acting...`,
-      thought: step.thought,
-      thinking: false,
-    });
-    await highlightTab(tabId, target.selector);
-    throwIfAborted(signal);
-    await actOn(tabId, target, action.value);
-    history.push(`filled ${target.description} with "${action.value}"`);
-    return;
-  }
-  // pressEnter
-  throwIfAborted(signal);
-  await pressEnterKey(tabId, target.selector);
-  history.push(`submitted ${target.description}`);
+  // one visible act sequence for click/fill/pressEnter: say it, show it, do it
   await updateHud(tabId, {
     plan: `→ ${target.description} — ${step.thought}`,
     status: `${tag}Acting...`,
     thought: step.thought,
     thinking: false,
   });
+  await highlightTab(tabId, target.selector).catch(() => {}); // cosmetic — never fatal
+  throwIfAborted(signal);
+  if (action.tool === 'click') {
+    await actOn(tabId, target);
+    history.push(`clicked ${target.description}`);
+    return;
+  }
+  if (action.tool === 'fill') {
+    await actOn(tabId, target, action.value);
+    history.push(`filled ${target.description} with "${action.value}"`);
+    return;
+  }
+  // pressEnter — same highlight+status-first treatment as every other act
+  const ok = await pressEnterKey(tabId, target.selector);
+  if (!ok) throw new Error(`submit target gone: ${target.description}`);
+  history.push(`submitted ${target.description}`);
 }
 
 export async function runGoal(goal: string, tabId: number, signal: AbortSignal): Promise<void> {
   const smart = await hasLLM().catch(() => false);
-  const meta = await getTabMeta(tabId).catch(() => ({ url: '', title: '' }));
+  const startUrl = (await getTabMeta(tabId).catch(() => ({ url: '', title: '' }))).url;
   const history: string[] = [];
   let lastError = '';
+  let phase = '';
+  let actFailures = 0;
 
   for (let step = 0; step < MAX_STEPS; step++) {
     throwIfAborted(signal);
     const tag = step > 0 ? `Step ${step + 1} — ` : '';
+
+    // fresh meta every step: after a navigate, yesterday's URL/title would lie
+    const meta = await getTabMeta(tabId).catch(() => ({ url: '', title: '' }));
+
+    // URL evidence beats another model round-trip when it exists
+    const verified = localVerify(goal, meta.url, startUrl, history.length > 0);
+    if (verified) {
+      await updateHud(tabId, {
+        verification: `✓ ${verified}`,
+        status: step > 0 ? `${tag}Verified` : 'Verified',
+        thought: history.join(' → ') || verified,
+        thinking: false,
+        showStop: false,
+        working: false,
+      });
+      return;
+    }
+
     await updateHud(tabId, {
       transcript: step === 0 ? goal : undefined,
       isFinal: true,
@@ -240,7 +304,9 @@ export async function runGoal(goal: string, tabId: number, signal: AbortSignal):
       thinking: true,
     });
 
+    const tScan = Date.now();
     const candidates = await observeTab(tabId);
+    const scanMs = Date.now() - tScan;
     if (!candidates.length) throw new Error('no candidates observed');
     const { ranked } = rankForGoal(goal, candidates);
     const shortlist = ranked.slice(0, SHORTLIST);
@@ -248,7 +314,7 @@ export async function runGoal(goal: string, tabId: number, signal: AbortSignal):
 
     await updateHud(tabId, {
       status: `${tag}Planning...`,
-      thought: `${candidates.length} controls · top match ${shortlist[0]?.description ?? '—'}`,
+      thought: `${candidates.length} controls${phase ? ` · ${phase}` : ''}`,
       thinking: true,
     });
 
@@ -260,9 +326,25 @@ export async function runGoal(goal: string, tabId: number, signal: AbortSignal):
     // one validated decision (up to 2 invalid retries, then the step fails)
     let invalid = 0;
     let decided: NormStep | null = null;
+    let thinkMs = 0;
     for (;;) {
-      const raw = await modelStep(goal, meta.url, meta.title, history, lastError, shown, tabId);
-      const v = validateStep(raw, shown.length);
+      throwIfAborted(signal);
+      const tThink = Date.now();
+      const raw = await modelStep(
+        goal,
+        meta.url,
+        meta.title,
+        history,
+        lastError,
+        shown,
+        tabId,
+        signal,
+      );
+      thinkMs = Date.now() - tThink;
+      const v =
+        raw === null
+          ? { ok: false as const, error: 'reply was not valid JSON — output only the JSON object' }
+          : validateStep(raw, shown.length);
       if (v.ok) {
         decided = v.step;
         break;
@@ -276,15 +358,32 @@ export async function runGoal(goal: string, tabId: number, signal: AbortSignal):
       await updateHud(tabId, {
         verification: `✓ ${decided.reason ?? 'done'}`,
         status: step > 0 ? `${tag}Verified` : 'Verified',
-        thought: history.join(' → ') || decided.reason,
+        thought: `${history.join(' → ')}${history.length ? ' · ' : ''}${fmt(thinkMs)} to decide`,
         thinking: false,
         showStop: false,
+        working: false,
       });
       return;
     }
 
     lastError = '';
-    await execAction(tabId, decided, shortlist, signal, history, tag);
+    const tAct = Date.now();
+    try {
+      await execAction(tabId, decided, shortlist, signal, history, tag);
+      phase = `scan ${fmt(scanMs)} · think ${fmt(thinkMs)} · act ${fmt(Date.now() - tAct)}`;
+    } catch (e) {
+      // a stale target or transient miss must NOT kill the command —
+      // re-observe and decide again (bounded), feeding the model the reason
+      if ((e as Error).name === 'AbortError' || signal.aborted) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (++actFailures > MAX_ACT_FAILURES) throw new Error(`action kept failing: ${msg}`);
+      lastError = `action failed: ${msg}`;
+      phase = `scan ${fmt(scanMs)} · think ${fmt(thinkMs)} · act failed`;
+      await updateHud(tabId, {
+        thought: `page changed while acting (${msg}) — re-checking…`,
+        thinking: true,
+      });
+    }
     // loop: fresh observation becomes the verdict on what just happened
   }
 
@@ -294,5 +393,6 @@ export async function runGoal(goal: string, tabId: number, signal: AbortSignal):
     thought: history.join(' → '),
     thinking: false,
     showStop: false,
+    working: false,
   });
 }

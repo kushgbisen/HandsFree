@@ -51,7 +51,7 @@ function openAIBaseUrl(provider) {
  * Streaming LLM call (SSE) — pushes growing text to onDelta so the pill
  * can show live thinking. Throws on any failure; caller falls back to callLLM.
  */
-export async function streamLLM(system, user, onDelta) {
+export async function streamLLM(system, user, onDelta, signal) {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');
   let url;
@@ -82,8 +82,15 @@ export async function streamLLM(system, user, onDelta) {
       ],
     };
   }
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!res.ok || !res.body) {
+    // status-tagged: the caller must NOT retry a non-stream call on auth or
+    // quota errors — it would fail identically and double the wait
+    const text = await res.text().catch(() => '');
+    const err = new Error(`HTTP ${res.status}: ${text.slice(0, 160) || res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -141,7 +148,7 @@ export async function validateKey() {
   const res = await fetch(`${openAIBaseUrl(cfg.provider)}/models`, { headers, signal });
   if (!res.ok) throw new Error(`rejected (${res.status}) — check key and model`);
 }
-export async function callLLM(system, user) {
+export async function callLLM(system, user, signal) {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');
   if (cfg.provider === 'aistudio') {
@@ -151,6 +158,7 @@ export async function callLLM(system, user) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
           contents: [{ parts: [{ text: user }] }],
@@ -178,6 +186,7 @@ export async function callLLM(system, user) {
         ? { 'HTTP-Referer': 'https://github.com/handsfree', 'X-Title': 'HandsFree' }
         : {}),
     },
+    signal,
     body: JSON.stringify({
       model: cfg.model,
       temperature: 0.1,

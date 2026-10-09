@@ -24,16 +24,16 @@ async function getActiveTabId() {
   return tab?.id ?? null;
 }
 /** Thin boundary: failures surface on the pill, aborts stay silent. */
-async function runCommand(transcript, signal) {
+async function runCommand(transcript, signal, tabHint) {
   try {
-    const tabId = await getActiveTabId();
+    const tabId = tabHint ?? (await getActiveTabId());
     if (!tabId) throw new Error('no active tab');
     await runGoal(transcript, tabId, signal);
   } catch (e) {
     if (e.name === 'AbortError') throw e;
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[command] failed:', msg);
-    const tabId = await getActiveTabId();
+    const tabId = tabHint ?? (await getActiveTabId());
     if (tabId) {
       await updateHud(tabId, {
         status: 'Failed',
@@ -41,11 +41,12 @@ async function runCommand(transcript, signal) {
         thought: String(msg).slice(0, 160),
         thinking: false,
         showStop: false,
+        working: false,
       });
     }
   }
 }
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (msg.type === 'hud') {
       const tabId = await getActiveTabId();
@@ -75,15 +76,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     if (msg.type === 'speech' && msg.isFinal && msg.text) {
       const text = msg.text.trim();
-      if (!text) return;
-      // interrupt handling
-      const isStop = /\b(stop|cancel|wait|hold on|abort)\b/i.test(text);
+      if (!text) {
+        sendResponse({ ok: true });
+        return;
+      }
+      // the tab that issued the command keeps it — switching tabs while the
+      // agent thinks must never redirect the action to a different page
+      const fromTab = sender?.tab?.id ?? null;
+      // interrupt ONLY when the command leads with a stop phrase — "search
+      // for wait times" or "cancel that comment later" are real commands
+      const isStop = /^\s*(please\s+)?(stop|cancel|abort|wait|hold on|never ?mind)\b/i.test(text);
       if (isStop) {
         const m = text.match(/actually[,:]?\s*(.+)/i);
         const newIntent = m
           ? m[1].trim()
           : text
-              .replace(/\b(stop|cancel|wait|hold on|abort)\b/gi, '')
+              .replace(/^\s*(please\s+)?(stop|cancel|abort|wait|hold on|never ?mind)\b/i, '')
               .replace(/[—\-:,]+/g, ' ')
               .trim();
         (runningController ?? currentAbort).abort();
@@ -91,12 +99,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // fresh controller — the old signal stays aborted forever
         currentAbort = new AbortController();
         const freshSignal = currentAbort.signal;
-        const tabId = await getActiveTabId();
+        const tabId = fromTab ?? (await getActiveTabId());
         if (tabId)
           await updateHud(tabId, {
             status: 'Interrupted',
             verification: 'Stopped',
             showStop: false,
+            working: false,
           });
         if (!newIntent || newIntent.length < 3) {
           sendResponse({ interrupted: true });
@@ -104,7 +113,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         // enqueue new intent on the fresh signal, not the aborted one
         queue.push({
-          run: () => runCommand(newIntent, freshSignal).catch(() => {}),
+          run: () => runCommand(newIntent, freshSignal, fromTab).catch(() => {}),
           controller: currentAbort,
         });
       } else {
@@ -112,7 +121,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const signal = currentAbort.signal;
         const controller = currentAbort;
         // errors already surface on the pill via runCommand's boundary — stay silent here
-        queue.push({ run: () => runCommand(text, signal).catch(() => {}), controller });
+        queue.push({
+          run: () => runCommand(text, signal, fromTab).catch(() => {}),
+          controller,
+        });
       }
       if (!running) {
         running = true;

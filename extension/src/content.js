@@ -32,6 +32,14 @@ function connectKeepalive() {
   }
 }
 connectKeepalive();
+// extension was reloaded/updated → this context is orphaned; say so instead
+// of failing silently on every message (the pill cannot fix itself otherwise)
+if (chrome.runtime.onInvalidated) {
+  chrome.runtime.onInvalidated.addListener(() => {
+    setPillStatus('Extension updated — refresh this tab (Ctrl+Shift+R)');
+    setMic('idle');
+  });
+}
 function injectHud() {
   if (document.getElementById(HUD_ID)) return;
   const style = document.createElement('style');
@@ -408,7 +416,7 @@ async function highlight(selector) {
 }
 async function act(candidate, value) {
   const el = document.querySelector(candidate.selector);
-  if (!el) throw new Error('candidate not found');
+  if (!el) throw new Error(`target disappeared: ${candidate.description}`);
   const needsFill = value !== undefined || candidate.method === 'fill';
   if (needsFill) {
     const text = value ?? '';
@@ -454,56 +462,70 @@ async function act(candidate, value) {
 }
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
-    if (msg.type === 'observe') {
-      const candidates = await observe();
-      sendResponse({ candidates });
-    } else if (msg.type === 'scroll') {
-      await scrollPage();
-      sendResponse({ ok: true, y: window.scrollY });
-    } else if (msg.type === 'highlight') {
-      await highlight(msg.selector);
-      sendResponse({ ok: true });
-    } else if (msg.type === 'act') {
-      await act(msg.candidate, msg.value);
-      sendResponse({ ok: true });
-    } else if (msg.type === 'pressEnter') {
-      const el = document.querySelector(msg.selector);
-      if (el) {
-        el.focus?.();
-        for (const t of ['keydown', 'keypress', 'keyup']) {
-          el.dispatchEvent(
-            new KeyboardEvent(t, {
-              bubbles: true,
-              cancelable: true,
-              key: 'Enter',
-              code: 'Enter',
-              keyCode: 13,
-              which: 13,
-            }),
-          );
+    try {
+      if (msg.type === 'observe') {
+        const candidates = await observe();
+        sendResponse({ candidates });
+      } else if (msg.type === 'scroll') {
+        await scrollPage();
+        sendResponse({ ok: true, y: window.scrollY });
+      } else if (msg.type === 'highlight') {
+        await highlight(msg.selector);
+        sendResponse({ ok: true });
+      } else if (msg.type === 'act') {
+        await act(msg.candidate, msg.value);
+        sendResponse({ ok: true });
+      } else if (msg.type === 'pressEnter') {
+        const el = document.querySelector(msg.selector);
+        if (el) {
+          el.focus?.();
+          for (const t of ['keydown', 'keypress', 'keyup']) {
+            el.dispatchEvent(
+              new KeyboardEvent(t, {
+                bubbles: true,
+                cancelable: true,
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+              }),
+            );
+          }
         }
+        sendResponse({ ok: !!el });
+      } else if (msg.type === 'hud') {
+        const u = msg.update;
+        const st = document.getElementById('hf-status');
+        const dot = document.getElementById('hf-dot');
+        const think = document.getElementById('hf-think');
+        if (think && u.thought !== undefined) think.textContent = u.thought;
+        if (think) think.classList.toggle('live', !!u.thinking);
+        if (u.transcript !== undefined && st) {
+          st.textContent = u.isFinal ? `Heard: "${u.transcript}"` : u.transcript || 'Listening…';
+        }
+        if (u.plan !== undefined && st && u.plan) st.textContent = u.plan;
+        if (u.status !== undefined && st) st.textContent = u.status;
+        if (u.verification !== undefined && st && u.verification) st.textContent = u.verification;
+        // Terminal result (verification present, or a settled status) must
+        // ALWAYS release the mic — otherwise the button stays a stop square
+        // after the first command and "tap to speak" becomes "tap to stop".
+        const terminal =
+          u.verification !== undefined ||
+          /verified|failed|interrupted|stopped|\bdone\b/i.test(u.status || '');
+        const working =
+          u.working ??
+          (terminal
+            ? false
+            : u.showStop || (u.status && !/idle|need help|interrupt/i.test(u.status)));
+        if (dot) dot.classList.toggle('busy', !!working || !!u.showMic);
+        if (u.showMic) setMic('listening');
+        else if (working) setMic('working');
+        else setMic('idle');
+        sendResponse({ ok: true });
       }
-      sendResponse({ ok: !!el });
-    } else if (msg.type === 'hud') {
-      const u = msg.update;
-      const st = document.getElementById('hf-status');
-      const dot = document.getElementById('hf-dot');
-      const think = document.getElementById('hf-think');
-      if (think && u.thought !== undefined) think.textContent = u.thought;
-      if (think) think.classList.toggle('live', !!u.thinking);
-      if (u.transcript !== undefined && st) {
-        st.textContent = u.isFinal ? `Heard: "${u.transcript}"` : u.transcript || 'Listening…';
-      }
-      if (u.plan !== undefined && st && u.plan) st.textContent = u.plan;
-      if (u.status !== undefined && st) st.textContent = u.status;
-      if (u.verification !== undefined && st && u.verification) st.textContent = u.verification;
-      const working =
-        u.working ?? (u.showStop || (u.status && !/idle|need help|interrupt/i.test(u.status)));
-      if (dot) dot.classList.toggle('busy', !!working || !!u.showMic);
-      if (u.showMic) setMic('listening');
-      else if (working) setMic('working');
-      else setMic('idle');
-      sendResponse({ ok: true });
+    } catch (e) {
+      // never leave the caller hanging with a dead port — report why
+      sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
     }
   })();
   return true;

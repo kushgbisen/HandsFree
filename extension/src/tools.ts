@@ -17,9 +17,26 @@ export async function getTabMeta(tabId: number): Promise<{ url: string; title: s
   return { url: tab.url ?? '', title: (tab.title ?? '').slice(0, 80) };
 }
 
-export async function observeTab(tabId: number): Promise<Candidate[]> {
-  const res = await chrome.tabs.sendMessage(tabId, { type: 'observe' });
-  return res?.candidates ?? [];
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Observe with retries: right after a navigation the content script may not
+ * be injected yet, and a transient miss must not kill the whole command.
+ */
+export async function observeTab(tabId: number, retries = 2): Promise<Candidate[]> {
+  let lastErr: unknown = new Error('observe failed');
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await chrome.tabs.sendMessage(tabId, { type: 'observe' });
+      if (!res) throw new Error('page did not respond to observe');
+      if (res.error) throw new Error(res.error);
+      return (res.candidates ?? []) as Candidate[];
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(350);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('observe failed');
 }
 
 export async function highlightTab(tabId: number, selector: string): Promise<void> {
@@ -27,7 +44,15 @@ export async function highlightTab(tabId: number, selector: string): Promise<voi
 }
 
 export async function actOn(tabId: number, candidate: Candidate, value?: string): Promise<void> {
-  await chrome.tabs.sendMessage(tabId, { type: 'act', candidate, value });
+  const res = (await chrome.tabs.sendMessage(tabId, {
+    type: 'act',
+    candidate,
+    value,
+  })) as { ok?: boolean; error?: string } | undefined;
+  // a failed act must throw with the page's reason, not silently "succeed"
+  if (res && res.ok === false) {
+    throw new Error(res.error || `could not act on ${candidate.description}`);
+  }
 }
 
 export async function pressEnterKey(tabId: number, selector: string): Promise<boolean> {

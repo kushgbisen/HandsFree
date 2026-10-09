@@ -67,6 +67,7 @@ export async function streamLLM(
   system: string,
   user: string,
   onDelta: (accumulated: string) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');
@@ -100,8 +101,17 @@ export async function streamLLM(
     };
   }
 
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!res.ok || !res.body) {
+    // status-tagged: the caller must NOT retry a non-stream call on auth or
+    // quota errors — it would fail identically and double the wait
+    const text = await res.text().catch(() => '');
+    const err: Error & { status?: number } = new Error(
+      `HTTP ${res.status}: ${text.slice(0, 160) || res.statusText}`,
+    );
+    err.status = res.status;
+    throw err;
+  }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -163,7 +173,7 @@ export async function validateKey(): Promise<void> {
   if (!res.ok) throw new Error(`rejected (${res.status}) — check key and model`);
 }
 
-export async function callLLM(system: string, user: string): Promise<string> {
+export async function callLLM(system: string, user: string, signal?: AbortSignal): Promise<string> {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');
 
@@ -174,6 +184,7 @@ export async function callLLM(system: string, user: string): Promise<string> {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
           contents: [{ parts: [{ text: user }] }],
@@ -203,6 +214,7 @@ export async function callLLM(system: string, user: string): Promise<string> {
         ? { 'HTTP-Referer': 'https://github.com/handsfree', 'X-Title': 'HandsFree' }
         : {}),
     },
+    signal,
     body: JSON.stringify({
       model: cfg.model,
       temperature: 0.1,

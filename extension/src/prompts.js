@@ -16,6 +16,35 @@ Rules:
 - done=true only when the ORIGINAL goal is fully achieved. Keep thought and reason to one sentence each.
 - History shows what you already did — never repeat an action that already worked.`;
 const TOOLS = ['click', 'fill', 'navigate', 'pressEnter', 'scroll'];
+/**
+ * Tolerant parse: raw JSON → fenced ```json blocks → first{…} slice.
+ * Returns null when nothing parseable exists, so the loop can feed the model
+ * a precise correction instead of burning a second blind request.
+ */
+export function extractJson(text) {
+  let t = (text ?? '').trim();
+  if (!t) return null;
+  if (t.startsWith('```'))
+    t = t
+      .replace(/^```[a-zA-Z]*\s*/, '')
+      .replace(/```\s*$/, '')
+      .trim();
+  try {
+    return JSON.parse(t);
+  } catch {
+    /* fall through to slice */
+  }
+  const s = t.indexOf('{');
+  const e = t.lastIndexOf('}');
+  if (s >= 0 && e > s) {
+    try {
+      return JSON.parse(t.slice(s, e + 1));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 function bad(error) {
   return { ok: false, error };
 }
