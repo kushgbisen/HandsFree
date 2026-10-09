@@ -136,11 +136,12 @@ function injectHud(): void {
     chrome.runtime
       .sendMessage({ type: 'hello' })
       .then((res: any) => {
+        const st = document.getElementById('hf-status');
+        if (!st || !st.textContent?.startsWith('Tap mic')) return;
         if (res && !res.hasKey) {
-          const st = document.getElementById('hf-status');
-          if (st && st.textContent?.startsWith('Tap mic')) {
-            setPillStatus('Set your key via the toolbar icon — basic mode until then');
-          }
+          setPillStatus('Set your key via the toolbar icon — basic mode until then');
+        } else if (res && res.hasKey && res.keyOk === false) {
+          setPillStatus('Saved key was rejected — open the toolbar popup, hit Test, then Save');
         }
       })
       .catch(() => {

@@ -120,6 +120,27 @@ export async function streamLLM(system, user, onDelta) {
 export async function hasLLM() {
   return (await getConfig().catch(() => null)) !== null;
 }
+/** Cheap validity probe: one tiny request, 8 s cap. Throws when rejected. */
+export async function validateKey() {
+  const cfg = await getConfig();
+  if (!cfg) throw new Error('no key saved');
+  const signal = AbortSignal.timeout(8000);
+  if (cfg.provider === 'aistudio') {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}?key=${cfg.apiKey}`,
+      { signal },
+    );
+    if (!res.ok) throw new Error(`rejected (${res.status}) — check key and model`);
+    return;
+  }
+  const headers = { Authorization: `Bearer ${cfg.apiKey}` };
+  if (cfg.provider === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://github.com/handsfree';
+    headers['X-Title'] = 'HandsFree';
+  }
+  const res = await fetch(`${openAIBaseUrl(cfg.provider)}/models`, { headers, signal });
+  if (!res.ok) throw new Error(`rejected (${res.status}) — check key and model`);
+}
 export async function callLLM(system, user) {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');

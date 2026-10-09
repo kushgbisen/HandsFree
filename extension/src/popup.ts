@@ -118,6 +118,7 @@ saveBtn.addEventListener('click', async () => {
     apiKey: key,
     AISTUDIO_API_KEY: key,
     [providerKeyField]: key,
+    hfKeyOk: false, // force a fresh validity probe on next page load
   });
   setStatus('Saved ✓ — close and use the on-page pill', 'ok');
   badgeEl.classList.remove('none');

@@ -5,6 +5,7 @@
  */
 import { runGoal } from './loop.js';
 import { updateHud } from './hud.js';
+import { validateKey } from './llm.js';
 
 const queue: Array<{ run: () => Promise<void>; controller: AbortController }> = [];
 let running = false;
@@ -41,7 +42,7 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
       await updateHud(tabId, {
         status: 'Failed',
         verification: `Failed: ${msg} — try rephrasing`,
-        thought: msg,
+        thought: String(msg).slice(0, 160),
         thinking: false,
         showStop: false,
       });
@@ -59,9 +60,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     if (msg.type === 'hello') {
       const data = (await chrome.storage.local
-        .get(['apiKey', 'AISTUDIO_API_KEY'])
+        .get(['apiKey', 'AISTUDIO_API_KEY', 'hfKeyOk'])
         .catch(() => ({}))) as any;
-      sendResponse({ hasKey: !!(data.apiKey || data.AISTUDIO_API_KEY) });
+      const hasKey = !!(data.apiKey || data.AISTUDIO_API_KEY);
+      // first contact with a saved-but-unverified key: probe once, cache it.
+      // a dead key is the classic cause of "always planning, never doing".
+      let keyOk: boolean | undefined = data.hfKeyOk === true ? true : undefined;
+      if (hasKey && keyOk !== true) {
+        try {
+          await validateKey();
+          await chrome.storage.local.set({ hfKeyOk: true });
+          keyOk = true;
+        } catch {
+          keyOk = false;
+        }
+      }
+      sendResponse({ hasKey, keyOk });
       return;
     }
     if (msg.type === 'speech' && msg.isFinal && msg.text) {

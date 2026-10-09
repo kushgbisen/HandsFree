@@ -21,7 +21,7 @@ import { callLLM, hasLLM, streamLLM } from './llm.js';
 
 const MAX_STEPS = 5;
 const SHORTLIST = 15;
-const MODEL_TIMEOUT = 25000;
+const MODEL_TIMEOUT = 12000;
 
 // --- ranking: prompt-size compression only, never a decision ---
 const STOPWORDS = new Set([
@@ -130,7 +130,7 @@ async function modelStep(
     return JSON.parse(text);
   } catch {
     await updateHud(tabId, { thinking: false }).catch(() => {});
-    const text = await withTimeout(callLLM(ACTOR_SYSTEM, user), 15000);
+    const text = await withTimeout(callLLM(ACTOR_SYSTEM, user), 10000);
     return JSON.parse(text);
   }
 }
