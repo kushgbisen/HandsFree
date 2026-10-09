@@ -3,47 +3,46 @@ import { getPage } from './launch.js';
 const HUD_ID = 'hf-hud';
 const STYLE_ID = 'hf-hud-style';
 
+// Tiny status pill — the main page already has the full UI, so the
+// injected overlay is only a working indicator + stop button.
+// Skipped entirely on the HUD page itself (it has #bar) to avoid double UI.
 const HUD_HTML = `
-<div id="${HUD_ID}" style="position:fixed;right:16px;bottom:16px;width:320px;min-height:100px;background:#111;color:#fff;z-index:2147483647;padding:12px;border-radius:12px;font:12px system-ui;box-shadow:0 4px 24px rgba(0,0,0,0.4);border:1px solid #262626;">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-    <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;"></span>
-    <span style="font-weight:600;">HandsFree</span>
-    <span id="hf-status" style="margin-left:auto;font-size:11px;color:#a3a3a3;">Idle</span>
-  </div>
-  <div id="hf-transcript" style="min-height:18px;color:#e5e5e5;margin-bottom:6px;word-break:break-word;"></div>
-  <div id="hf-plan" style="font-size:11px;color:#facc15;min-height:14px;margin-bottom:6px;word-break:break-word;"></div>
-  <div id="hf-verification" style="font-size:11px;color:#a3a3a3;min-height:14px;"></div>
-  <button id="hf-stop" style="margin-top:8px;width:100%;padding:6px;background:#ef4444;color:#fff;border:0;border-radius:8px;font-weight:600;cursor:pointer;display:none;">STOP</button>
+<div id="${HUD_ID}">
+  <span id="hf-dot"></span>
+  <span id="hf-status">Idle</span>
+  <button id="hf-stop" title="Stop agent">■</button>
 </div>
 `;
 
 const HUD_CSS = `
-#${HUD_ID} { font-family: system-ui, -apple-system, sans-serif; }
+#${HUD_ID}{position:fixed;right:16px;bottom:16px;display:flex;align-items:center;gap:8px;background:rgba(17,17,17,0.92);color:#fff;z-index:2147483647;border-radius:24px;padding:8px 8px 8px 12px;border:1px solid #2a2a2a;font:12px system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.4)}
+#hf-dot{width:8px;height:8px;background:#22c55e;border-radius:50%;flex:none}
+#hf-dot.busy{background:#facc15;animation:hf-blink 1s infinite}
+@keyframes hf-blink{50%{opacity:.35}}
+#hf-status{color:#d4d4d4;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#hf-stop{display:none;width:28px;height:28px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:12px;font-weight:700;cursor:pointer;flex:none}
+#hf-stop:hover{background:#dc2626}
 `;
 
-/**
- * Injects HUD overlay into the Playwright page. Persists across navigations via addInitScript.
- */
-export async function injectHud(): Promise<void> {
-  const page = getPage();
+const SKIP_IF_PRESENT = 'bar'; // main HUD page marker — don't double up
 
-  // addInitScript ensures HUD re-injects on every navigation
+type InjectArgs = {
+  hudId: string;
+  hudHtml: string;
+  styleId: string;
+  hudCss: string;
+  skip: string;
+  serverUrl: string;
+};
+
+export async function injectHud(serverUrl = 'http://localhost:3000'): Promise<void> {
+  const page = getPage();
   await page.addInitScript(
-    ({
-      hudId,
-      hudHtml,
-      styleId,
-      hudCss,
-    }: {
-      hudId: string;
-      hudHtml: string;
-      styleId: string;
-      hudCss: string;
-    }) => {
+    ({ hudId, hudHtml, styleId, hudCss, skip, serverUrl }: InjectArgs) => {
       const inject = () => {
+        if (document.getElementById(skip)) return; // this IS the HUD page
         if (document.getElementById(hudId)) return;
         if (!document.body) {
-          // body not yet available, retry
           setTimeout(inject, 100);
           return;
         }
@@ -55,45 +54,36 @@ export async function injectHud(): Promise<void> {
         }
         const wrapper = document.createElement('div');
         wrapper.innerHTML = hudHtml;
-        const hud = wrapper.firstElementChild as HTMLElement;
-        document.body.appendChild(hud);
-        const stopBtn = document.getElementById('hf-stop') as HTMLButtonElement | null;
-        stopBtn?.addEventListener('click', () => {
-          fetch('/command', {
+        document.body.appendChild(wrapper.firstElementChild as HTMLElement);
+        document.getElementById('hf-stop')?.addEventListener('click', () => {
+          fetch(serverUrl + '/command', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: 'stop' }),
           }).catch(() => {});
         });
       };
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', inject);
-      } else {
-        inject();
-      }
-      // also observe DOM for SPA navigations that replace body
-      const observer = new MutationObserver(() => {
-        if (!document.getElementById(hudId) && document.body) inject();
-      });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
+      else inject();
+      new MutationObserver(() => {
+        if (!document.getElementById(skip) && !document.getElementById(hudId) && document.body)
+          inject();
+      }).observe(document.documentElement, { childList: true, subtree: true });
     },
-    { hudId: HUD_ID, hudHtml: HUD_HTML, styleId: STYLE_ID, hudCss: HUD_CSS },
+    {
+      hudId: HUD_ID,
+      hudHtml: HUD_HTML,
+      styleId: STYLE_ID,
+      hudCss: HUD_CSS,
+      skip: SKIP_IF_PRESENT,
+      serverUrl,
+    },
   );
 
-  // also inject immediately for current page
   await page
     .evaluate(
-      ({
-        hudId,
-        hudHtml,
-        styleId,
-        hudCss,
-      }: {
-        hudId: string;
-        hudHtml: string;
-        styleId: string;
-        hudCss: string;
-      }) => {
+      ({ hudId, hudHtml, styleId, hudCss, skip, serverUrl }: InjectArgs) => {
+        if (document.getElementById(skip)) return;
         if (document.getElementById(hudId)) return;
         if (!document.getElementById(styleId)) {
           const style = document.createElement('style');
@@ -103,10 +93,25 @@ export async function injectHud(): Promise<void> {
         }
         const wrapper = document.createElement('div');
         wrapper.innerHTML = hudHtml;
-        const hud = wrapper.firstElementChild as HTMLElement;
-        if (document.body) document.body.appendChild(hud);
+        if (document.body) {
+          document.body.appendChild(wrapper.firstElementChild as HTMLElement);
+          document.getElementById('hf-stop')?.addEventListener('click', () => {
+            fetch(serverUrl + '/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: 'stop' }),
+            }).catch(() => {});
+          });
+        }
       },
-      { hudId: HUD_ID, hudHtml: HUD_HTML, styleId: STYLE_ID, hudCss: HUD_CSS },
+      {
+        hudId: HUD_ID,
+        hudHtml: HUD_HTML,
+        styleId: STYLE_ID,
+        hudCss: HUD_CSS,
+        skip: SKIP_IF_PRESENT,
+        serverUrl,
+      },
     )
     .catch(() => {});
 }
@@ -117,22 +122,29 @@ export type HudUpdate = {
   status?: string;
   verification?: string;
   showStop?: boolean;
+  isFinal?: boolean;
 };
 
 export async function updateHud(update: HudUpdate): Promise<void> {
   const page = getPage();
   await page
     .evaluate((u: HudUpdate) => {
-      const tr = document.getElementById('hf-transcript');
-      const pl = document.getElementById('hf-plan');
+      if (document.getElementById('bar')) return; // main page shows its own UI
       const st = document.getElementById('hf-status');
-      const ve = document.getElementById('hf-verification');
+      const dot = document.getElementById('hf-dot');
       const stop = document.getElementById('hf-stop') as HTMLButtonElement | null;
-      if (u.transcript !== undefined && tr) tr.textContent = u.transcript;
-      if (u.plan !== undefined && pl) pl.textContent = u.plan;
-      if (u.status !== undefined && st) st.textContent = u.status;
-      if (u.verification !== undefined && ve) ve.textContent = u.verification;
-      if (u.showStop !== undefined && stop) stop.style.display = u.showStop ? 'block' : 'none';
+      const label =
+        u.status ??
+        (u.verification?.includes('✓')
+          ? 'Done'
+          : (u.verification ?? u.plan ?? u.transcript?.replace(/^"|"$/g, '')));
+      if (label && st) st.textContent = label.slice(0, 60);
+      if (dot)
+        dot.classList.toggle('busy', !!u.status && !/idle|done|verif|need help/i.test(u.status));
+      if (stop) {
+        const working = !!u.status && !/idle|verified|need help|done/i.test(u.status);
+        stop.style.display = working || u.showStop ? 'block' : 'none';
+      }
     }, update)
     .catch(() => {});
 }

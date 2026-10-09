@@ -17,6 +17,14 @@ const port = Number(process.env.PORT) || 3000;
 const testUrl = process.env.TEST_URL ?? `http://localhost:${port}/`;
 
 app.use(express.json());
+// pill controls injected on external sites POST cross-origin — allow it
+app.use((_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (_req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
 const hudDir = path.join(__dirname, 'hud');
 app.use(express.static(hudDir));
@@ -41,6 +49,20 @@ function extractNewIntent(text: string): string | null {
   return cleaned.length > 2 ? cleaned : null;
 }
 
+// "go to X / open X / visit X" — universal navigation to any site.
+// URL-like targets go direct; plain words fall back to a Google search
+// so the agent lands somewhere real and the next command can click.
+function extractNavTarget(text: string): string | null {
+  const m = text.match(/(?:go to|open|visit|navigate to)\s+(.+)/i);
+  if (!m) return null;
+  const target = m[1].trim().replace(/[.,;!]+$/, '');
+  if (!target) return null;
+  if (/^https?:\/\//i.test(target)) return target;
+  if (/^localhost/i.test(target)) return `http://${target}`;
+  if (/[.:]\w{2,}/i.test(target) && !/\s/.test(target)) return `https://${target}`;
+  return `https://www.google.com/search?q=${encodeURIComponent(target)}`;
+}
+
 app.post('/command', async (req, res) => {
   let text: string | undefined = req.body?.text?.trim();
   if (!text) return res.status(400).json({ message: 'missing text' });
@@ -53,7 +75,7 @@ app.post('/command', async (req, res) => {
     try {
       console.log('[server] re-launching browser...');
       await initBrowser(testUrl);
-      await injectHud().catch(() => {});
+      await injectHud(`http://localhost:${port}`).catch(() => {});
     } catch (e) {
       console.warn('[server] re-launch failed', e);
     }
@@ -85,6 +107,31 @@ app.post('/command', async (req, res) => {
     console.log(
       `[command] "${text}" — page closed=${page.isClosed()} browser connected=${browser.isConnected()} url=${page.url()}`,
     );
+    // universal navigation happens before the observe loop — one page, any site
+    const navUrl = extractNavTarget(text);
+    if (navUrl) {
+      await updateHud({
+        transcript: `"${text}"`,
+        status: `Going to ${navUrl}…`,
+        plan: '',
+        verification: '',
+        showStop: true,
+      }).catch(() => {});
+      try {
+        await page.goto(navUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await injectHud(`http://localhost:${port}`).catch(() => {});
+        await updateHud({ status: 'Idle', verification: `✓ ${page.url()}`, showStop: false }).catch(
+          () => {},
+        );
+        console.log(`[nav] "${text}" -> ${page.url()}`);
+        return res.json({ message: `✓ went to ${page.url()}`, url: page.url() });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[nav] failed:', msg);
+        return res.status(500).json({ message: `navigation failed: ${msg}` });
+      }
+    }
+
     await updateHud({
       transcript: `"${text}"`,
       status: 'Observing...',
@@ -204,7 +251,9 @@ const server = app.listen(port, async () => {
   try {
     console.log(`[server] launching browser → ${testUrl}`);
     await initBrowser(testUrl);
-    await injectHud().catch((e) => console.warn('[hud] inject failed', e));
+    await injectHud(`http://localhost:${port}`).catch((e) =>
+      console.warn('[hud] inject failed', e),
+    );
     console.log('[server] browser ready');
   } catch (err) {
     console.warn('[server] browser init failed (will retry on first /command):', err);
