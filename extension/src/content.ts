@@ -77,7 +77,7 @@ function injectHud(): void {
     if (m === 'working') {
       chrome.runtime.sendMessage({ type: 'speech', text: 'stop', isFinal: true });
     } else {
-      chrome.runtime.sendMessage({ type: 'startMic' });
+      toggleMic();
     }
   });
   document.getElementById('hf-min')?.addEventListener('click', () => {
@@ -98,6 +98,73 @@ else injectHud();
 new MutationObserver(() => {
   if (!document.getElementById(HUD_ID) && document.body) injectHud();
 }).observe(document.documentElement, { childList: true, subtree: true });
+
+function setPillStatus(t: string): void {
+  const st = document.getElementById('hf-status');
+  if (st) st.textContent = t;
+}
+
+// --- voice input: runs HERE in the page, not in the offscreen document ---
+// The tap is a real user gesture and the mic permission bubble appears
+// on the actual site (youtube.com asks once, then remembers).
+const PageSR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+let pageRec: any = null;
+let pageListening = false;
+
+function toggleMic(): void {
+  if (!PageSR) {
+    setPillStatus('Voice needs Chrome desktop — type instead');
+    return;
+  }
+  if (!pageRec) {
+    pageRec = new PageSR();
+    pageRec.continuous = false;
+    pageRec.interimResults = true;
+    pageRec.lang = 'en-US';
+    pageRec.onstart = () => {
+      pageListening = true;
+      setMic('listening');
+      setPillStatus('Listening… speak clearly');
+    };
+    pageRec.onend = () => {
+      pageListening = false;
+      const m = (window as unknown as { __hfMode: string }).__hfMode;
+      if (m !== 'working') {
+        setMic('idle');
+        setPillStatus('Tap mic or type below');
+      }
+    };
+    pageRec.onerror = (e: any) => {
+      pageListening = false;
+      setMic('idle');
+      const err = e.error || 'unknown';
+      setPillStatus(
+        err === 'not-allowed' || err === 'service-not-allowed'
+          ? 'Mic blocked — click 🔒 in the address bar → Allow mic, then tap again'
+          : err === 'no-speech'
+            ? 'Nothing heard — speak closer or type instead'
+            : err === 'audio-capture'
+              ? 'No microphone found — plug one in or type instead'
+              : 'Mic issue (' + err + ') — try again or type instead',
+      );
+    };
+    pageRec.onresult = (e: any) => {
+      const r = e.results[e.results.length - 1];
+      const text: string = r[0].transcript;
+      if (!r.isFinal) {
+        setPillStatus(text || 'Listening…');
+      } else if (text.trim()) {
+        chrome.runtime.sendMessage({ type: 'speech', text: text.trim(), isFinal: true });
+      }
+    };
+  }
+  try {
+    if (pageListening) pageRec.stop();
+    else pageRec.start();
+  } catch {
+    setPillStatus('Mic busy — try again');
+  }
+}
 
 function setMic(mode: 'idle' | 'listening' | 'working'): void {
   (window as unknown as { __hfMode: string }).__hfMode = mode;
@@ -286,6 +353,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'observe') {
       const candidates = await observe();
       sendResponse({ candidates });
+    } else if (msg.type === 'startMic') {
+      toggleMic();
+      sendResponse({ ok: true });
     } else if (msg.type === 'scroll') {
       await scrollPage();
       sendResponse({ ok: true, y: window.scrollY });
