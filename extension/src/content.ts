@@ -340,7 +340,7 @@ async function highlight(selector: string): Promise<void> {
   if (el) {
     el.classList.add(HIGHLIGHT_CLASS);
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 400));
   }
 }
 
@@ -350,12 +350,30 @@ async function act(candidate: Candidate, value?: string): Promise<void> {
   const needsFill = value !== undefined || candidate.method === 'fill';
   if (needsFill) {
     const text = value ?? '';
-    (el as HTMLElement).focus?.();
-    if ((el as HTMLElement).isContentEditable) {
-      // YouTube comment boxes, rich editors: no .value — write text + input events
-      el.textContent = text;
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+    const tgt = el as HTMLElement;
+    // click first (expands collapsed editors), then focus — like a human
+    if (!(el instanceof HTMLSelectElement)) {
+      try {
+        tgt.click();
+      } catch {
+        /* collapsed or covered — focus below still works */
+      }
+    }
+    tgt.focus?.();
+    if (tgt.isContentEditable) {
+      // rich editors (YouTube comments): execCommand registers as real typing,
+      // textContent assignment is often ignored by the editor framework
+      let done = false;
+      try {
+        const sel = window.getSelection();
+        sel?.selectAllChildren(tgt);
+        done = document.execCommand('insertText', false, text);
+      } catch {
+        done = false;
+      }
+      if (!done) tgt.textContent = text;
+      tgt.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+      tgt.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
       el.value = text;
       el.dispatchEvent(new Event('input', { bubbles: true }));
