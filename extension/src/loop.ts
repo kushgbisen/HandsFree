@@ -17,6 +17,7 @@ import {
 import { updateHud } from './hud.js';
 import { ACTOR_SYSTEM, extractJson, validateStep, type NormStep } from './prompts.js';
 import { callLLM, hasLLM, streamLLM } from './llm.js';
+import { matchOpenGoal, resolveSite } from './sites.js';
 
 const MAX_STEPS = 5;
 const SHORTLIST = 15;
@@ -191,6 +192,37 @@ async function modelStep(
   return extractJson(text);
 }
 
+/**
+ * Deterministic site opener. Pure "open X" goals never reach the model:
+ * known site → navigate + verified. Unknown → navigate to a Google search
+ * for it and return false so the loop clicks the result.
+ */
+async function tryDirectOpen(goal: string, tabId: number, signal: AbortSignal): Promise<boolean> {
+  const name = matchOpenGoal(goal);
+  if (!name) return false;
+  const { url, direct } = await resolveSite(name);
+  await updateHud(tabId, {
+    transcript: goal,
+    isFinal: true,
+    status: `Opening ${url}…`,
+    thought: direct ? 'known site — going straight there' : `resolving "${name}" via search`,
+    thinking: true,
+    working: true,
+  });
+  throwIfAborted(signal);
+  const finalUrl = await navigateTab(tabId, url, signal);
+  if (!direct) return false;
+  await updateHud(tabId, {
+    verification: `✓ opened ${finalUrl}`,
+    status: 'Verified',
+    thought: `opened ${finalUrl} without guessing`,
+    thinking: false,
+    showStop: false,
+    working: false,
+  });
+  return true;
+}
+
 /** No-key degraded mode: one crude act, then done. A rule, not intelligence. */
 async function fallbackStep(goal: string, tabId: number, shortlist: Candidate[]): Promise<void> {
   const top = shortlist[0];
@@ -270,6 +302,8 @@ async function execAction(
 export async function runGoal(goal: string, tabId: number, signal: AbortSignal): Promise<void> {
   const smart = await hasLLM().catch(() => false);
   const startUrl = (await getTabMeta(tabId).catch(() => ({ url: '', title: '' }))).url;
+  // pure "open X" goals skip the model entirely — deterministic, instant
+  if (await tryDirectOpen(goal, tabId, signal)) return;
   const history: string[] = [];
   let lastError = '';
   let phase = '';

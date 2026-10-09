@@ -62,6 +62,7 @@ standard ARIA semantics; cross-origin iframes are not visible to the agent.
 | FR8  | Interrupt: "stop/cancel/wait" aborts the running controller, clears the queue, accepts a replacement intent ("stop, actually …")                                                                             |
 | FR9  | HUD: single-line status + streaming thought line, mic morphs to stop while working, minimize, light/dark adaptive                                                                                            |
 | FR10 | Key setup: provider + model + key with live Test against the provider; first-run nudge when no key is saved                                                                                                  |
+| FR11 | Deterministic site opener: pure "open X" goals skip the model (known map → live `<name>.com` probe → Google assist); ambiguous nouns fall through to the loop                                                |
 
 ## 4. Non-Functional Requirements
 
@@ -185,3 +186,4 @@ flowchart LR
 | FR8  | `background.ts` interrupt + queue                   | M4            |
 | FR9  | `content.ts` pill, `hud.ts`                         | M1–M5 display |
 | FR10 | `popup.ts`, `content.ts` hello nudge                | setup         |
+| FR11 | `sites.ts` map/probe, `loop.ts` tryDirectOpen       | demo opens    |
