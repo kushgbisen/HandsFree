@@ -137,6 +137,10 @@ export async function streamLLM(
   return acc;
 }
 
+export async function hasLLM(): Promise<boolean> {
+  return (await getConfig().catch(() => null)) !== null;
+}
+
 export async function callLLM(system: string, user: string): Promise<string> {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');
