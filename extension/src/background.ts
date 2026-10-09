@@ -3,7 +3,7 @@
  * Owns the serial queue, interrupts, and message routing.
  * Thinking lives in loop.ts (ReAct); hands live in tools.ts.
  */
-import { runGoal } from './loop.js';
+import { runChain } from './loop.js';
 import { updateHud } from './hud.js';
 import { transcribeAudio, validateKey } from './llm.js';
 
@@ -57,7 +57,7 @@ async function runCommand(
   try {
     const tabId = tabHint ?? (await getActiveTabId());
     if (!tabId) throw new Error('no active tab');
-    await runGoal(transcript, tabId, signal);
+    await runChain(transcript, tabId, signal);
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     const msg = e instanceof Error ? e.message : String(e);

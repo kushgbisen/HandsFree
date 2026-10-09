@@ -444,17 +444,56 @@ function isVisible(el) {
  * ARIA-first observation: every actionable control as role + accessible name —
  * the language LLMs natively understand. Scans deep (cap 200); the background
  * ranks by intent and sends only the top 15 to the model.
+ *
+ * Shadow-DOM aware: component pages (YouTube et al) hide their controls
+ * inside open shadow roots, invisible to document.querySelectorAll. We walk
+ * into them, and cache live element handles — a selector string cannot cross
+ * a shadow boundary, but the cached handle can.
  */
+const elCache = new Map();
+function collectDeep(root, into, depth) {
+  if (depth > 6 || into.length >= 600) return;
+  root.querySelectorAll(OBSERVE_SELECTOR).forEach((el) => {
+    if (into.length < 600) into.push(el);
+  });
+  if (depth >= 6) return;
+  root.querySelectorAll('*').forEach((el) => {
+    const sr = el.shadowRoot;
+    if (sr) collectDeep(sr, into, depth + 1);
+  });
+}
+/** Cached handle first (shadow-safe), selector fallback, dead handles rejected. */
+function resolveEl(id, selector) {
+  if (id !== undefined) {
+    const cached = elCache.get(id);
+    if (cached?.isConnected) return cached;
+  }
+  return document.querySelector(selector);
+}
 async function observe() {
-  document.querySelectorAll('[data-hf-id]').forEach((el) => el.removeAttribute('data-hf-id'));
-  const els = Array.from(document.querySelectorAll(OBSERVE_SELECTOR)).filter((el) => {
+  elCache.forEach((el) => {
+    try {
+      el.removeAttribute('data-hf-id');
+    } catch {
+      /* detached — dropped below */
+    }
+  });
+  elCache.clear();
+  const raw = [];
+  collectDeep(document, raw, 0);
+  const els = raw.filter((el) => {
     if (el.closest(`#${HUD_ID}`)) return false;
     if (!ACTIONABLE_ROLES.has(computedRole(el))) return false;
     if (el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true') return false;
     return isVisible(el);
   });
   return els.slice(0, 200).map((el, i) => {
-    el.setAttribute('data-hf-id', String(i));
+    elCache.set(i, el);
+    try {
+      el.setAttribute('data-hf-id', String(i));
+    } catch {
+      /* some shadow hosts reject attributes — cache still holds the handle */
+    }
     const role = computedRole(el);
     const isFill = role === 'textbox' || role === 'searchbox' || role === 'combobox';
     const live =
@@ -476,19 +515,24 @@ async function observe() {
 async function scrollPage() {
   window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'instant' });
 }
-async function highlight(selector) {
-  document
-    .querySelectorAll(`.${HIGHLIGHT_CLASS}`)
-    .forEach((el) => el.classList.remove(HIGHLIGHT_CLASS));
-  const el = document.querySelector(selector);
+let lastHl = null;
+async function highlight(selector, id) {
+  try {
+    lastHl?.classList.remove(HIGHLIGHT_CLASS);
+  } catch {
+    /* detached */
+  }
+  lastHl = null;
+  const el = resolveEl(id, selector);
   if (el) {
+    lastHl = el;
     el.classList.add(HIGHLIGHT_CLASS);
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await new Promise((r) => setTimeout(r, 400));
   }
 }
 async function act(candidate, value) {
-  const el = document.querySelector(candidate.selector);
+  const el = resolveEl(candidate.id, candidate.selector);
   if (!el) throw new Error(`target disappeared: ${candidate.description}`);
   const needsFill = value !== undefined || candidate.method === 'fill';
   if (needsFill) {
@@ -543,13 +587,37 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await scrollPage();
         sendResponse({ ok: true, y: window.scrollY });
       } else if (msg.type === 'highlight') {
-        await highlight(msg.selector);
+        await highlight(msg.selector, msg.id);
         sendResponse({ ok: true });
       } else if (msg.type === 'act') {
         await act(msg.candidate, msg.value);
         sendResponse({ ok: true });
+      } else if (msg.type === 'readValue') {
+        const el = resolveEl(msg.id, msg.selector);
+        const v =
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+            ? el.value
+            : (el?.textContent ?? '');
+        sendResponse({ ok: true, value: (v ?? '').trim() });
+      } else if (msg.type === 'playerQuality') {
+        const player = document.getElementById('movie_player');
+        const levels =
+          typeof player?.getAvailableQualityLevels === 'function'
+            ? (player.getAvailableQualityLevels() ?? [])
+            : [];
+        if (!player || !levels.length) {
+          sendResponse({ ok: false, error: 'no video player with quality levels on this page' });
+        } else {
+          const want = typeof msg.want === 'number' ? msg.want : null;
+          const pick = want
+            ? (levels.find((l) => l.includes(String(want))) ?? levels[0])
+            : levels[0];
+          player.setPlaybackQualityRange?.(pick, pick);
+          player.setPlaybackQuality?.(pick);
+          sendResponse({ ok: true, level: pick });
+        }
       } else if (msg.type === 'pressEnter') {
-        const el = document.querySelector(msg.selector);
+        const el = resolveEl(msg.id, msg.selector);
         if (el) {
           el.focus?.();
           for (const t of ['keydown', 'keypress', 'keyup']) {

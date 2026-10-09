@@ -10,12 +10,15 @@ import {
   navigateTab,
   observeTab,
   pressEnterKey,
+  readLiveValue,
   scrollOnce,
+  setPlayerQuality,
 } from './tools.js';
 import { updateHud } from './hud.js';
 import { ACTOR_SYSTEM, extractJson, validateStep } from './prompts.js';
 import { callLLM, hasLLM, streamLLM } from './llm.js';
 import { matchOpenGoal, resolveSite } from './sites.js';
+import { splitGoal } from './tasks.js';
 const MAX_STEPS = 5;
 const SHORTLIST = 15;
 const MODEL_TIMEOUT = 12000;
@@ -102,7 +105,13 @@ function normalizeNavigateTarget(target) {
 function searchQueryOf(url) {
   try {
     const u = new URL(url);
-    return u.searchParams.get('q') ?? u.searchParams.get('query') ?? u.searchParams.get('s');
+    return (
+      u.searchParams.get('q') ??
+      u.searchParams.get('query') ??
+      u.searchParams.get('s') ??
+      u.searchParams.get('search_query') ?? // YouTube
+      u.searchParams.get('search') // some engines
+    );
   } catch {
     return null;
   }
@@ -176,7 +185,7 @@ async function modelStep(goal, url, title, history, lastError, shown, tabId, sig
  */
 async function tryDirectOpen(goal, tabId, signal) {
   const name = matchOpenGoal(goal);
-  if (!name) return false;
+  if (!name) return null;
   const { url, direct } = await resolveSite(name);
   await updateHud(tabId, {
     transcript: goal,
@@ -188,7 +197,7 @@ async function tryDirectOpen(goal, tabId, signal) {
   });
   throwIfAborted(signal);
   const finalUrl = await navigateTab(tabId, url, signal);
-  if (!direct) return false;
+  if (!direct) return null;
   await updateHud(tabId, {
     verification: `✓ opened ${finalUrl}`,
     status: 'Verified',
@@ -197,12 +206,19 @@ async function tryDirectOpen(goal, tabId, signal) {
     showStop: false,
     working: false,
   });
-  return true;
+  return finalUrl;
+}
+/** "set quality to max / 720p / 4k" → deterministic player-API route. */
+function matchQualityGoal(goal) {
+  if (!/\b(quality|resolution|full\s*hd|\bhd\b|[24]k\b|8k\b|\d{3,4}\s*p?\b)/i.test(goal))
+    return { matched: false, pixels: null };
+  const m = goal.match(/(2160|1440|1080|720|480|360|240|144)/);
+  return { matched: true, pixels: m ? parseInt(m[1], 10) : null };
 }
 /** No-key degraded mode: one crude act, then done. A rule, not intelligence. */
 async function fallbackStep(goal, tabId, shortlist) {
   const top = shortlist[0];
-  await highlightTab(tabId, top.selector).catch(() => {});
+  await highlightTab(tabId, top.selector, top.id).catch(() => {});
   let value;
   if (top.method === 'fill') {
     const m = goal.match(/ with (.+)$/i);
@@ -217,7 +233,7 @@ async function fallbackStep(goal, tabId, shortlist) {
     working: false,
   });
 }
-async function execAction(tabId, step, shortlist, signal, history, tag) {
+async function execAction(tabId, step, shortlist, signal, history, evidence, tag) {
   const action = step.action;
   if (action.tool === 'scroll') {
     await scrollOnce(tabId);
@@ -249,7 +265,7 @@ async function execAction(tabId, step, shortlist, signal, history, tag) {
     thought: step.thought,
     thinking: false,
   });
-  await highlightTab(tabId, target.selector).catch(() => {}); // cosmetic — never fatal
+  await highlightTab(tabId, target.selector, target.id).catch(() => {}); // cosmetic — never fatal
   throwIfAborted(signal);
   if (action.tool === 'click') {
     await actOn(tabId, target);
@@ -258,28 +274,74 @@ async function execAction(tabId, step, shortlist, signal, history, tag) {
   }
   if (action.tool === 'fill') {
     await actOn(tabId, target, action.value);
+    // evidence, not trust: read back what the field actually holds
+    const live = await readLiveValue(tabId, target.id, target.selector).catch(() => '');
+    const want = action.value.trim().toLowerCase();
+    const got = live.toLowerCase();
+    const stuck = !!want && (got.includes(want) || (got.length >= 4 && want.startsWith(got)));
+    if (!stuck)
+      throw new Error(
+        `"${action.value}" did not stick in ${target.description} (saw "${live.slice(0, 40)}")`,
+      );
     history.push(`filled ${target.description} with "${action.value}"`);
+    evidence.push(`"${action.value}" stuck in ${target.description}`);
     return;
   }
   // pressEnter — same highlight+status-first treatment as every other act
-  const ok = await pressEnterKey(tabId, target.selector);
+  const ok = await pressEnterKey(tabId, target.selector, target.id);
   if (!ok) throw new Error(`submit target gone: ${target.description}`);
   history.push(`submitted ${target.description}`);
 }
 export async function runGoal(goal, tabId, signal) {
   const smart = await hasLLM().catch(() => false);
-  const startUrl = (await getTabMeta(tabId).catch(() => ({ url: '', title: '' }))).url;
-  // pure "open X" goals skip the model entirely — deterministic, instant
-  if (await tryDirectOpen(goal, tabId, signal)) return;
+  const startMeta = await getTabMeta(tabId).catch(() => ({ url: '', title: '' }));
+  const startUrl = startMeta.url;
   const history = [];
+  const evidence = [];
+  // pure "open X" goals skip the model entirely — deterministic, instant
+  const opened = await tryDirectOpen(goal, tabId, signal);
+  if (opened) return { ok: true, note: `opened ${opened}` };
+  // "set quality…" talks to the video player directly — no menu maze
+  const q = matchQualityGoal(goal);
+  if (q.matched) {
+    await updateHud(tabId, {
+      transcript: goal,
+      isFinal: true,
+      status: 'Setting quality…',
+      thought: 'talking to the video player directly',
+      thinking: true,
+      working: true,
+    });
+    try {
+      const level = await setPlayerQuality(tabId, q.pixels);
+      const note = `quality set to ${level}`;
+      await updateHud(tabId, {
+        verification: `✓ ${note}`,
+        status: 'Verified',
+        thought: `${note} — confirmed by the player`,
+        thinking: false,
+        showStop: false,
+        working: false,
+      });
+      return { ok: true, note };
+    } catch {
+      // no player here (yet) — fall through to the loop's menu route
+    }
+  }
   let lastError = '';
   let phase = '';
   let actFailures = 0;
+  let prevMeta = startMeta;
   for (let step = 0; step < MAX_STEPS; step++) {
     throwIfAborted(signal);
     const tag = step > 0 ? `Step ${step + 1} — ` : '';
     // fresh meta every step: after a navigate, yesterday's URL/title would lie
     const meta = await getTabMeta(tabId).catch(() => ({ url: '', title: '' }));
+    // observed page moves are evidence — recorded for the final receipt
+    if (history.length > 0 && (meta.url !== prevMeta.url || meta.title !== prevMeta.title)) {
+      evidence.push(`page is now ${(meta.title || meta.url).slice(0, 100)}`);
+    }
+    prevMeta = meta;
     // URL evidence beats another model round-trip when it exists
     const verified = localVerify(goal, meta.url, startUrl, history.length > 0);
     if (verified) {
@@ -291,7 +353,7 @@ export async function runGoal(goal, tabId, signal) {
         showStop: false,
         working: false,
       });
-      return;
+      return { ok: true, note: verified };
     }
     await updateHud(tabId, {
       transcript: step === 0 ? goal : undefined,
@@ -314,7 +376,10 @@ export async function runGoal(goal, tabId, signal) {
     });
     if (!smart) {
       await fallbackStep(goal, tabId, shortlist);
-      return;
+      return {
+        ok: true,
+        note: `acted on ${shortlist[0]?.description ?? 'top control'} (basic mode)`,
+      };
     }
     // one validated decision (up to 2 invalid retries, then the step fails)
     let invalid = 0;
@@ -347,20 +412,21 @@ export async function runGoal(goal, tabId, signal) {
       await updateHud(tabId, { thought: `correcting: ${v.error}`, thinking: true });
     }
     if (decided.done) {
+      const receipt = `${history.join(' → ')}${evidence.length ? ` · proven: ${evidence.join('; ')}` : ''} · ${fmt(thinkMs)} to decide`;
       await updateHud(tabId, {
         verification: `✓ ${decided.reason ?? 'done'}`,
         status: step > 0 ? `${tag}Verified` : 'Verified',
-        thought: `${history.join(' → ')}${history.length ? ' · ' : ''}${fmt(thinkMs)} to decide`,
+        thought: history.length || evidence.length ? receipt : (decided.reason ?? 'done'),
         thinking: false,
         showStop: false,
         working: false,
       });
-      return;
+      return { ok: true, note: decided.reason ?? 'done' };
     }
     lastError = '';
     const tAct = Date.now();
     try {
-      await execAction(tabId, decided, shortlist, signal, history, tag);
+      await execAction(tabId, decided, shortlist, signal, history, evidence, tag);
       phase = `scan ${fmt(scanMs)} · think ${fmt(thinkMs)} · act ${fmt(Date.now() - tAct)}`;
     } catch (e) {
       // a stale target or transient miss must NOT kill the command —
@@ -381,6 +447,72 @@ export async function runGoal(goal, tabId, signal) {
     status: 'Done',
     verification: `stopped after ${MAX_STEPS} steps`,
     thought: history.join(' → '),
+    thinking: false,
+    showStop: false,
+    working: false,
+  });
+  return {
+    ok: false,
+    note: `stopped after ${MAX_STEPS} steps: ${history.join(' → ') || 'no action taken'}`,
+  };
+}
+/**
+ * Compound-task chain. Splits "open youtube, search Interstellar, play the
+ * first vid" into sequential runGoal calls on the same tab — each with its
+ * own verdict. Stops at the first failure and names it; later tasks never
+ * run on a broken earlier one.
+ */
+export async function runChain(goal, tabId, signal) {
+  const tasks = splitGoal(goal);
+  if (tasks.length < 2) {
+    await runGoal(goal, tabId, signal);
+    return;
+  }
+  const notes = [];
+  for (let i = 0; i < tasks.length; i++) {
+    throwIfAborted(signal);
+    const sub = tasks[i];
+    await updateHud(tabId, {
+      transcript: i === 0 ? goal : undefined,
+      isFinal: true,
+      status: `Task ${i + 1}/${tasks.length} — ${sub.slice(0, 60)}`,
+      thought: i === 0 ? 'breaking the job into steps…' : `previous: ${notes[i - 1]}`,
+      thinking: true,
+    });
+    let r;
+    try {
+      r = await runGoal(sub, tabId, signal);
+    } catch (e) {
+      if (e.name === 'AbortError' || signal.aborted) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      await updateHud(tabId, {
+        status: 'Failed',
+        verification: `Failed at task ${i + 1}/${tasks.length} ("${sub}"): ${msg}`,
+        thought: `stopped — ${msg}`.slice(0, 160),
+        thinking: false,
+        showStop: false,
+        working: false,
+      });
+      return;
+    }
+    if (!r.ok) {
+      await updateHud(tabId, {
+        status: 'Failed',
+        verification: `Failed at task ${i + 1}/${tasks.length} ("${sub}"): ${r.note}`,
+        thought: 'stopped — later tasks skipped',
+        thinking: false,
+        showStop: false,
+        working: false,
+      });
+      return;
+    }
+    notes.push(r.note);
+  }
+  const receipt = notes.join(' · ');
+  await updateHud(tabId, {
+    verification: `✓ ${tasks.length}/${tasks.length} — ${receipt}`,
+    status: 'Verified',
+    thought: receipt,
     thinking: false,
     showStop: false,
     working: false,

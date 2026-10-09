@@ -493,10 +493,47 @@ function isVisible(el: Element): boolean {
  * ARIA-first observation: every actionable control as role + accessible name —
  * the language LLMs natively understand. Scans deep (cap 200); the background
  * ranks by intent and sends only the top 15 to the model.
+ *
+ * Shadow-DOM aware: component pages (YouTube et al) hide their controls
+ * inside open shadow roots, invisible to document.querySelectorAll. We walk
+ * into them, and cache live element handles — a selector string cannot cross
+ * a shadow boundary, but the cached handle can.
  */
+const elCache = new Map<number, Element>();
+
+function collectDeep(root: Document | ShadowRoot, into: Element[], depth: number): void {
+  if (depth > 6 || into.length >= 600) return;
+  root.querySelectorAll(OBSERVE_SELECTOR).forEach((el) => {
+    if (into.length < 600) into.push(el);
+  });
+  if (depth >= 6) return;
+  root.querySelectorAll('*').forEach((el) => {
+    const sr = (el as HTMLElement).shadowRoot;
+    if (sr) collectDeep(sr, into, depth + 1);
+  });
+}
+
+/** Cached handle first (shadow-safe), selector fallback, dead handles rejected. */
+function resolveEl(id: number | undefined, selector: string): HTMLElement | null {
+  if (id !== undefined) {
+    const cached = elCache.get(id);
+    if (cached?.isConnected) return cached as HTMLElement;
+  }
+  return document.querySelector(selector) as HTMLElement | null;
+}
+
 async function observe(): Promise<Candidate[]> {
-  document.querySelectorAll('[data-hf-id]').forEach((el) => el.removeAttribute('data-hf-id'));
-  const els = Array.from(document.querySelectorAll(OBSERVE_SELECTOR)).filter((el) => {
+  elCache.forEach((el) => {
+    try {
+      el.removeAttribute('data-hf-id');
+    } catch {
+      /* detached — dropped below */
+    }
+  });
+  elCache.clear();
+  const raw: Element[] = [];
+  collectDeep(document, raw, 0);
+  const els = raw.filter((el) => {
     if ((el as HTMLElement).closest(`#${HUD_ID}`)) return false;
     if (!ACTIONABLE_ROLES.has(computedRole(el))) return false;
     if ((el as HTMLElement).hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true')
@@ -505,7 +542,12 @@ async function observe(): Promise<Candidate[]> {
   });
 
   return els.slice(0, 200).map((el, i) => {
-    (el as HTMLElement).setAttribute('data-hf-id', String(i));
+    elCache.set(i, el);
+    try {
+      (el as HTMLElement).setAttribute('data-hf-id', String(i));
+    } catch {
+      /* some shadow hosts reject attributes — cache still holds the handle */
+    }
     const role = computedRole(el);
     const isFill = role === 'textbox' || role === 'searchbox' || role === 'combobox';
     const live =
@@ -529,12 +571,17 @@ async function scrollPage(): Promise<void> {
   window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'instant' as ScrollBehavior });
 }
 
-async function highlight(selector: string): Promise<void> {
-  document
-    .querySelectorAll(`.${HIGHLIGHT_CLASS}`)
-    .forEach((el) => el.classList.remove(HIGHLIGHT_CLASS));
-  const el = document.querySelector(selector) as HTMLElement | null;
+let lastHl: Element | null = null;
+async function highlight(selector: string, id?: number): Promise<void> {
+  try {
+    lastHl?.classList.remove(HIGHLIGHT_CLASS);
+  } catch {
+    /* detached */
+  }
+  lastHl = null;
+  const el = resolveEl(id, selector);
   if (el) {
+    lastHl = el;
     el.classList.add(HIGHLIGHT_CLASS);
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await new Promise((r) => setTimeout(r, 400));
@@ -542,7 +589,7 @@ async function highlight(selector: string): Promise<void> {
 }
 
 async function act(candidate: Candidate, value?: string): Promise<void> {
-  const el = document.querySelector(candidate.selector) as HTMLElement | null;
+  const el = resolveEl(candidate.id, candidate.selector);
   if (!el) throw new Error(`target disappeared: ${candidate.description}`);
   const needsFill = value !== undefined || candidate.method === 'fill';
   if (needsFill) {
@@ -598,13 +645,41 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await scrollPage();
         sendResponse({ ok: true, y: window.scrollY });
       } else if (msg.type === 'highlight') {
-        await highlight(msg.selector);
+        await highlight(msg.selector, msg.id);
         sendResponse({ ok: true });
       } else if (msg.type === 'act') {
         await act(msg.candidate, msg.value);
         sendResponse({ ok: true });
+      } else if (msg.type === 'readValue') {
+        const el = resolveEl(msg.id, msg.selector);
+        const v =
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+            ? el.value
+            : ((el as HTMLElement | null)?.textContent ?? '');
+        sendResponse({ ok: true, value: (v ?? '').trim() });
+      } else if (msg.type === 'playerQuality') {
+        const player = document.getElementById('movie_player') as unknown as {
+          getAvailableQualityLevels?: () => string[];
+          setPlaybackQuality?: (q: string) => void;
+          setPlaybackQualityRange?: (min: string, max: string) => void;
+        } | null;
+        const levels: string[] =
+          typeof player?.getAvailableQualityLevels === 'function'
+            ? (player.getAvailableQualityLevels() ?? [])
+            : [];
+        if (!player || !levels.length) {
+          sendResponse({ ok: false, error: 'no video player with quality levels on this page' });
+        } else {
+          const want: number | null = typeof msg.want === 'number' ? msg.want : null;
+          const pick = want
+            ? (levels.find((l) => l.includes(String(want))) ?? levels[0])
+            : levels[0];
+          player.setPlaybackQualityRange?.(pick, pick);
+          player.setPlaybackQuality?.(pick);
+          sendResponse({ ok: true, level: pick });
+        }
       } else if (msg.type === 'pressEnter') {
-        const el = document.querySelector(msg.selector) as HTMLElement | null;
+        const el = resolveEl(msg.id, msg.selector);
         if (el) {
           (el as HTMLElement).focus?.();
           for (const t of ['keydown', 'keypress', 'keyup']) {

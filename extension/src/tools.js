@@ -27,8 +27,8 @@ export async function observeTab(tabId, retries = 2) {
   }
   throw lastErr instanceof Error ? lastErr : new Error('observe failed');
 }
-export async function highlightTab(tabId, selector) {
-  await chrome.tabs.sendMessage(tabId, { type: 'highlight', selector });
+export async function highlightTab(tabId, selector, id) {
+  await chrome.tabs.sendMessage(tabId, { type: 'highlight', selector, id });
 }
 export async function actOn(tabId, candidate, value) {
   const res = await chrome.tabs.sendMessage(tabId, {
@@ -41,11 +41,26 @@ export async function actOn(tabId, candidate, value) {
     throw new Error(res.error || `could not act on ${candidate.description}`);
   }
 }
-export async function pressEnterKey(tabId, selector) {
+export async function pressEnterKey(tabId, selector, id) {
   const res = await chrome.tabs
-    .sendMessage(tabId, { type: 'pressEnter', selector })
+    .sendMessage(tabId, { type: 'pressEnter', selector, id })
     .catch(() => null);
   return !!res?.ok;
+}
+/** Read back what a fill actually left in the field — the fill-stick check. */
+export async function readLiveValue(tabId, id, selector) {
+  const res = await chrome.tabs
+    .sendMessage(tabId, { type: 'readValue', id, selector })
+    .catch(() => null);
+  return res?.value ?? '';
+}
+/** Deterministic quality via the page's own video player API (no menu maze). */
+export async function setPlayerQuality(tabId, want) {
+  const res = await chrome.tabs
+    .sendMessage(tabId, { type: 'playerQuality', want })
+    .catch(() => null);
+  if (!res?.ok) throw new Error(res?.error || 'quality change failed');
+  return res.level || 'max';
 }
 export async function scrollOnce(tabId) {
   await chrome.tabs.sendMessage(tabId, { type: 'scroll' }).catch(() => {});

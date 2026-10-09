@@ -39,8 +39,8 @@ export async function observeTab(tabId: number, retries = 2): Promise<Candidate[
   throw lastErr instanceof Error ? lastErr : new Error('observe failed');
 }
 
-export async function highlightTab(tabId: number, selector: string): Promise<void> {
-  await chrome.tabs.sendMessage(tabId, { type: 'highlight', selector });
+export async function highlightTab(tabId: number, selector: string, id?: number): Promise<void> {
+  await chrome.tabs.sendMessage(tabId, { type: 'highlight', selector, id });
 }
 
 export async function actOn(tabId: number, candidate: Candidate, value?: string): Promise<void> {
@@ -55,11 +55,32 @@ export async function actOn(tabId: number, candidate: Candidate, value?: string)
   }
 }
 
-export async function pressEnterKey(tabId: number, selector: string): Promise<boolean> {
+export async function pressEnterKey(
+  tabId: number,
+  selector: string,
+  id?: number,
+): Promise<boolean> {
   const res = await chrome.tabs
-    .sendMessage(tabId, { type: 'pressEnter', selector })
+    .sendMessage(tabId, { type: 'pressEnter', selector, id })
     .catch(() => null);
   return !!res?.ok;
+}
+
+/** Read back what a fill actually left in the field — the fill-stick check. */
+export async function readLiveValue(tabId: number, id: number, selector: string): Promise<string> {
+  const res = (await chrome.tabs
+    .sendMessage(tabId, { type: 'readValue', id, selector })
+    .catch(() => null)) as { ok?: boolean; value?: string } | null;
+  return res?.value ?? '';
+}
+
+/** Deterministic quality via the page's own video player API (no menu maze). */
+export async function setPlayerQuality(tabId: number, want: number | null): Promise<string> {
+  const res = (await chrome.tabs
+    .sendMessage(tabId, { type: 'playerQuality', want })
+    .catch(() => null)) as { ok?: boolean; level?: string; error?: string } | null;
+  if (!res?.ok) throw new Error(res?.error || 'quality change failed');
+  return res.level || 'max';
 }
 
 export async function scrollOnce(tabId: number): Promise<void> {
