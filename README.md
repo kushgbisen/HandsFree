@@ -2,6 +2,8 @@
 
 Voice-controlled browser automation.
 
+New machine? Start at [SETUP.md](./SETUP.md) (Windows + Scoop one-command setup).
+
 ## Quick start
 
 ```bash
