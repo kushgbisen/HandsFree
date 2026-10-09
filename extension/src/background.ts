@@ -2,7 +2,7 @@
  * HandsFree — MV3 background service worker (no Node, no Playwright)
  * Fix #1 keepalive via Port + storage.session checkpoint
  */
-import { callLLM } from './llm.js';
+import { callLLM, streamLLM } from './llm.js';
 
 type Candidate = {
   id: number;
@@ -41,6 +41,13 @@ async function highlight(tabId: number, selector: string): Promise<void> {
 
 async function act(tabId: number, candidate: Candidate, value?: string): Promise<void> {
   await chrome.tabs.sendMessage(tabId, { type: 'act', candidate, value });
+}
+
+async function pressEnter(tabId: number, selector: string): Promise<boolean> {
+  const res = await chrome.tabs
+    .sendMessage(tabId, { type: 'pressEnter', selector })
+    .catch(() => null);
+  return !!res?.ok;
 }
 
 async function updateHud(tabId: number, update: any): Promise<void> {
@@ -120,7 +127,13 @@ function rankCandidates(
   return { ranked: scored.map((x) => x.c), best: scored.length ? scored[0].s : 0 };
 }
 
-async function planWithLLM(transcript: string, candidates: Candidate[]): Promise<Plan> {
+export type PageCtx = { tabId?: number; url?: string; title?: string };
+
+async function planWithLLM(
+  transcript: string,
+  candidates: Candidate[],
+  ctx?: PageCtx,
+): Promise<Plan> {
   // pre-ranked shortlist: model sees top 15, best first — index maps back below
   const { ranked } = rankCandidates(transcript, candidates);
   const shortlist = ranked.slice(0, 15).map((c, i) => ({ ...c, id: i }));
@@ -131,12 +144,33 @@ Rules for "value": when the intent contains words to write, put them in value an
 - "search for cats" on a search box -> value "cats"
 - Pure clicks ("click sign in", "post it") -> omit value.
 Never invent a target or index outside the list. One sentence of reasoning.`;
-  const user = `Transcript: "${transcript}"\nCandidates:\n${JSON.stringify(
+  const pageLine = ctx?.url ? `Page: ${ctx.title || ''} <${ctx.url}>\n` : '';
+  const user = `${pageLine}Transcript: "${transcript}"\nCandidates:\n${JSON.stringify(
     shortlist.map((c) => ({ id: c.id, description: c.description, method: c.method })),
     null,
     2,
   )}`;
-  const text = await callLLM(system, user);
+  // live thought stream when we have a tab to narrate to, plain call otherwise
+  let text: string;
+  if (ctx?.tabId !== undefined) {
+    const tabId = ctx.tabId;
+    try {
+      let last = 0;
+      text = await streamLLM(system, user, (delta) => {
+        const now = Date.now();
+        if (now - last > 150) {
+          last = now;
+          updateHud(tabId, { thought: delta.slice(0, 140), thinking: true }).catch(() => {});
+        }
+      });
+      await updateHud(tabId, { thinking: false }).catch(() => {});
+    } catch {
+      await updateHud(tabId, { thinking: false }).catch(() => {});
+      text = await callLLM(system, user);
+    }
+  } else {
+    text = await callLLM(system, user);
+  }
   const parsed = JSON.parse(text);
   const raw = parsed.index !== undefined ? parsed : (parsed.plan ?? parsed);
   if (raw.index < 0 || raw.index >= shortlist.length)
@@ -150,12 +184,29 @@ Never invent a target or index outside the list. One sentence of reasoning.`;
   };
 }
 
+/** Pull the words-to-type out of the transcript when there is no LLM. */
+function extractValue(transcript: string): string | undefined {
+  if (/omit value|no text to type/i.test(transcript)) return undefined;
+  const pats = [
+    /(?:comment|say|write)\s+(.+)/i,
+    /search(?: for)?\s+(.+)/i,
+    /fill\s+.+?\s+with\s+(.+)/i,
+    /type\s+(.+?)(?:\s+(?:in|into|inside)\b.*)?$/i,
+  ];
+  for (const p of pats) {
+    const m = transcript.match(p);
+    if (m && m[1].trim()) return m[1].trim().replace(/[.?!'"]+$/, '');
+  }
+  return undefined;
+}
+
 function fallbackPlan(transcript: string, candidates: Candidate[]): Plan {
   const { ranked, best } = rankCandidates(transcript, candidates);
   const verb = Array.from(VERB_ONLY).find((v) => transcript.toLowerCase().includes(v)) ?? 'act on';
   return {
     index: ranked[0].id,
     reasoning: `fallback: ${verb} ${ranked[0].description} (score ${best})`,
+    value: extractValue(transcript),
   };
 }
 
@@ -177,15 +228,23 @@ async function verify(
 }
 
 async function runCommand(transcript: string, signal: AbortSignal): Promise<void> {
-  const tabId = await getActiveTabId();
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tabId = activeTab?.id ?? null;
   if (!tabId) throw new Error('no active tab');
+  let beforeUrl = activeTab.url ?? '';
+  const pageCtx: PageCtx = {
+    tabId,
+    url: activeTab.url ?? '',
+    title: (activeTab.title ?? '').slice(0, 80),
+  };
 
-  await updateHud(tabId, { transcript, isFinal: true, status: 'Observing...' });
-  let beforeUrl = '';
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    beforeUrl = tab.url ?? '';
-  } catch {}
+  await updateHud(tabId, {
+    transcript,
+    isFinal: true,
+    status: 'Observing...',
+    thought: 'scanning controls…',
+    thinking: true,
+  });
   let retries = 0;
   while (retries <= 2) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -208,46 +267,82 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
       scrolls++;
     }
     if (scrolls > 0) console.log(`[command] discover: ${scrolls} scrolls, best score ${best}`);
-    await updateHud(tabId, { plan: `Found ${candidates.length}`, status: 'Planning...' });
+    const { ranked: topRanked } = rankCandidates(transcript, candidates);
+    await updateHud(tabId, {
+      plan: `Found ${candidates.length}`,
+      status: 'Planning...',
+      thought: `${candidates.length} controls · top match ${topRanked[0]?.description ?? '—'}`,
+      thinking: true,
+    });
     let plan: Plan;
     try {
-      plan = await planWithLLM(transcript, candidates);
+      plan = await planWithLLM(transcript, candidates, pageCtx);
     } catch {
+      await updateHud(tabId, { thinking: false }).catch(() => {});
       plan = fallbackPlan(transcript, candidates);
     }
     const candidate = candidates[plan.index];
     await updateHud(tabId, {
       plan: `→ ${candidate.description} — ${plan.reasoning}`,
       status: 'Acting...',
+      thought: plan.reasoning,
+      thinking: false,
     });
     await highlight(tabId, candidate.selector);
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     await act(tabId, candidate, plan.value);
 
-    // chained submit: "comment nice video" fills AND posts in one command.
-    // After a fill, look once for the submit/post button and click it.
+    // chained submit: fill AND post in one command.
+    // Enter first (submits nearly every search box), button click as fallback
+    // (comment boxes need the Comment/Post button — Enter just adds a newline).
     const filled = plan.value !== undefined || candidate.method === 'fill';
     if (filled && /comment|post|send|search|submit|publish/i.test(transcript)) {
       try {
-        const again = await observe(tabId);
-        const submit = await planWithLLM(
-          `click the submit/post/search button to complete: "${transcript}" (no text to type, omit value)`,
-          again,
-        );
-        const submitTarget = again[submit.index];
-        await updateHud(tabId, {
-          plan: `→ ${submitTarget.description} — posting…`,
-          status: 'Acting...',
-          working: true,
-        });
-        await highlight(tabId, submitTarget.selector);
-        if (!signal.aborted) await act(tabId, submitTarget);
+        let submitted = false;
+        if (!/comment|post|publish/i.test(transcript)) {
+          await pressEnter(tabId, candidate.selector);
+          await new Promise((r) => setTimeout(r, 900));
+          if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          try {
+            const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+            submitted = (t.url ?? beforeUrl) !== beforeUrl;
+          } catch {
+            submitted = false;
+          }
+          if (submitted) {
+            await updateHud(tabId, {
+              plan: '→ submitted with Enter',
+              status: 'Verifying...',
+              working: true,
+            });
+          }
+        }
+        if (!submitted) {
+          const again = await observe(tabId);
+          const submit = await planWithLLM(
+            `click the submit/post/search button to complete: "${transcript}" (no text to type, omit value)`,
+            again,
+            pageCtx,
+          );
+          const submitTarget = again[submit.index];
+          await updateHud(tabId, {
+            plan: `→ ${submitTarget.description} — posting…`,
+            status: 'Acting...',
+            working: true,
+          });
+          await highlight(tabId, submitTarget.selector);
+          if (!signal.aborted) await act(tabId, submitTarget);
+        }
       } catch (e) {
         console.warn('[command] chained submit skipped', e);
       }
     }
 
-    await updateHud(tabId, { status: 'Verifying...' });
+    await updateHud(tabId, {
+      status: 'Verifying...',
+      thought: 'checking result…',
+      thinking: true,
+    });
     await new Promise((r) => setTimeout(r, 400));
     const afterCandidates = await observe(tabId);
     let afterUrl = beforeUrl;
@@ -260,6 +355,8 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
       await updateHud(tabId, {
         verification: `✓ ${result.reason}`,
         status: 'Verified',
+        thought: result.reason,
+        thinking: false,
         showStop: false,
       });
       return;
@@ -268,6 +365,7 @@ async function runCommand(transcript: string, signal: AbortSignal): Promise<void
       await updateHud(tabId, {
         verification: `Need help: ${result.reason}`,
         status: 'Need help',
+        thinking: false,
         showStop: false,
       });
       return;
@@ -325,19 +423,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               .trim();
         currentAbort.abort();
         queue.length = 0;
+        // fresh controller — the old signal stays aborted forever
+        currentAbort = new AbortController();
+        const freshSignal = currentAbort.signal;
         const tabId = await getActiveTabId();
         if (tabId)
           await updateHud(tabId, {
             status: 'Interrupted',
-            verification: '⚡ Interrupted',
+            verification: 'Stopped',
             showStop: false,
           });
         if (!newIntent || newIntent.length < 3) {
           sendResponse({ interrupted: true });
           return;
         }
-        // enqueue new intent
-        queue.push(() => runCommand(newIntent, currentAbort.signal).catch(() => {}));
+        // enqueue new intent on the fresh signal, not the aborted one
+        queue.push(() => runCommand(newIntent, freshSignal).catch(() => {}));
       } else {
         currentAbort = new AbortController();
         const signal = currentAbort.signal;

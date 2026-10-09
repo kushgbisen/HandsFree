@@ -9,15 +9,19 @@ port.onDisconnect.addListener(() =>
 const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
 let rec: any = null;
 let listening = false;
+let starting = false;
 
 function say(text: string) {
   chrome.runtime.sendMessage({ type: 'hud', update: { status: text } }).catch(() => {});
 }
 
 function startRec(r: any) {
+  if (starting) return;
   try {
+    starting = true;
     r.start();
   } catch (e) {
+    starting = false;
     say('Mic failed: ' + (e instanceof Error ? e.message : String(e)));
   }
 }
@@ -33,12 +37,14 @@ function ensureRec(): any {
   rec.interimResults = true;
   rec.lang = 'en-US';
   rec.onstart = () => {
+    starting = false;
     listening = true;
     chrome.runtime
       .sendMessage({ type: 'hud', update: { status: 'Listening…', showMic: true } })
       .catch(() => {});
   };
   rec.onend = () => {
+    starting = false;
     listening = false;
     chrome.runtime
       .sendMessage({ type: 'hud', update: { status: 'Idle', showMic: false } })
