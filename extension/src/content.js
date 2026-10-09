@@ -63,6 +63,9 @@ function injectHud() {
     #${HUD_ID} #hf-think:empty{display:none;margin:0}
     #${HUD_ID} #hf-think.live{background:linear-gradient(90deg,#a1a1a6 25%,#ffd60a 50%,#a1a1a6 75%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:hf-shimmer 1.2s linear infinite}
     @keyframes hf-shimmer{to{background-position:-200% 0}}
+    #${HUD_ID} #hf-level{height:3px;border-radius:2px;background:rgba(127,127,127,0.25);margin:0 0 12px;overflow:hidden;display:none}
+    #${HUD_ID} #hf-level.on{display:block}
+    #${HUD_ID} #hf-level i{display:block;height:100%;width:0%;background:#30d158;border-radius:2px}
     #${HUD_ID} #hf-row{display:flex;gap:10px;align-items:center}
     #${HUD_ID} #hf-mic{width:40px;height:40px;flex:none;border-radius:50%;border:0;background:#f5f5f7;color:#1d1d1f;display:grid;place-items:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);transition:transform 0.18s cubic-bezier(0.32,0.72,0,1),background 0.2s ease,box-shadow 0.2s ease}
     #${HUD_ID} #hf-mic:hover{transform:scale(1.06)}
@@ -103,6 +106,7 @@ function injectHud() {
     <div id="hf-body">
       <div id="hf-status">Tap mic or type below</div>
       <div id="hf-think"></div>
+      <div id="hf-level"><i id="hf-leveli"></i></div>
       <div id="hf-row">
         <button id="hf-mic" title="Tap to speak">${MIC_SVG}</button>
         <input id="hf-type" placeholder="Try “comment nice video”" aria-label="Type command" autocomplete="off" />
@@ -164,16 +168,14 @@ function setPillStatus(t) {
   const st = document.getElementById('hf-status');
   if (st) st.textContent = t;
 }
-// --- voice input: runs HERE in the page, not in the offscreen document ---
-// The tap is a real user gesture and the mic permission bubble appears
-// on the actual site (youtube.com asks once, then remembers).
-const PageSR = window.webkitSpeechRecognition || window.SpeechRecognition;
-let pageRec = null;
-let pageListening = false;
-let pageStarting = false;
+let recording = null;
+const REC_MAX_MS = 20000;
+const SILENCE_MS = 1600;
+const LEVEL_GATE = 0.02;
 /** Pre-flight mic check: names the exact blocker instead of failing silent. */
 async function diagnoseMic() {
-  if (!PageSR) return 'Voice needs Chrome desktop — type instead';
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
+    return 'Voice needs Chrome desktop — type instead';
   try {
     const devices = await navigator.mediaDevices?.enumerateDevices?.();
     if (devices && !devices.some((d) => d.kind === 'audioinput')) {
@@ -193,94 +195,165 @@ async function diagnoseMic() {
   return null;
 }
 function toggleMic() {
-  if (!PageSR) {
-    setPillStatus('Voice needs Chrome desktop — type instead');
+  if (recording) {
+    stopRecording();
     return;
   }
-  if (!pageRec) {
-    pageRec = new PageSR();
-    pageRec.continuous = false;
-    pageRec.interimResults = true;
-    pageRec.lang = 'en-US';
-    pageRec.onstart = () => {
-      pageStarting = false;
-      pageListening = true;
-      setMic('listening');
-      setPillStatus('Listening… speak clearly');
-    };
-    pageRec.onend = () => {
-      pageStarting = false;
-      pageListening = false;
-      const m = window.__hfMode;
-      if (m !== 'working') {
-        setMic('idle');
-        setPillStatus('Tap mic or type below');
-      }
-    };
-    pageRec.onerror = (e) => {
-      pageStarting = false;
-      pageListening = false;
-      setMic('idle');
-      const err = e.error || 'unknown';
-      if (err === 'not-allowed' || err === 'service-not-allowed') {
-        // re-diagnose for the precise fix (blocked vs no-device vs API)
-        diagnoseMic().then((m) =>
-          setPillStatus(
-            m ?? 'Mic blocked — allow microphone access in the address bar, then tap again',
-          ),
-        );
-      } else {
-        setPillStatus(
-          err === 'no-speech'
-            ? 'Nothing heard — speak closer or type instead'
-            : err === 'audio-capture'
-              ? 'No microphone found — plug one in or type instead'
-              : 'Mic issue (' + err + ') — try again or type instead',
-        );
-      }
-    };
-    pageRec.onresult = (e) => {
-      const r = e.results[e.results.length - 1];
-      const text = r[0].transcript;
-      if (!r.isFinal) {
-        setPillStatus(text || 'Listening…');
-      } else if (text.trim()) {
-        safeSend({ type: 'speech', text: text.trim(), isFinal: true });
-      }
-    };
-  }
-  if (pageListening || pageStarting) {
-    try {
-      pageRec.stop();
-    } catch {
-      pageStarting = false;
-    }
-    return;
-  }
-  // fresh start: diagnose first (fast, local), then start while the tap is fresh
-  pageStarting = true;
-  diagnoseMic().then((problem) => {
-    if (problem) {
-      pageStarting = false;
-      setPillStatus(problem);
-      return;
-    }
-    try {
-      pageRec.start();
-    } catch {
-      pageStarting = false;
-      setPillStatus('Mic busy — try again');
-      return;
-    }
-    // permission bubble pending: Chrome waits for the user, we must not look dead
-    setTimeout(() => {
-      if (pageStarting && !pageListening) {
-        setPillStatus(
-          'Waiting for mic permission — allow it in the browser prompt, or type instead',
-        );
-      }
-    }, 2500);
+  void startRecording();
+}
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result ?? '').split(',')[1] ?? '');
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
   });
+}
+function setLevel(on, frac = 0) {
+  const wrap = document.getElementById('hf-level');
+  const fill = document.getElementById('hf-leveli');
+  if (wrap) wrap.classList.toggle('on', on);
+  if (fill) fill.style.width = `${Math.round(Math.min(1, Math.max(0, frac)) * 100)}%`;
+}
+async function startRecording() {
+  // fast local pre-checks first (no device / hard-blocked), then the real prompt
+  const problem = await diagnoseMic();
+  if (problem) {
+    setPillStatus(problem);
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    const n = e?.name || '';
+    setMic('idle');
+    setPillStatus(
+      n === 'NotAllowedError'
+        ? 'Mic blocked — click the icon left of the address bar → Site settings → Microphone → Allow, then tap again'
+        : n === 'NotFoundError' || n === 'OverconstrainedError'
+          ? 'No microphone found — plug one in or type instead'
+          : n === 'NotReadableError'
+            ? 'Mic is busy in another app — close it and tap again'
+            : 'Mic issue (' + (n || 'unknown') + ') — try again or type instead',
+    );
+    return;
+  }
+  const mime =
+    ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => {
+      try {
+        return MediaRecorder.isTypeSupported(m);
+      } catch {
+        return false;
+      }
+    }) || '';
+  const mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  const actx = new AudioContext();
+  const analyser = actx.createAnalyser();
+  analyser.fftSize = 512;
+  try {
+    actx.createMediaStreamSource(stream).connect(analyser);
+  } catch {
+    /* level meter optional — recording still works */
+  }
+  const st = {
+    mr,
+    stream,
+    chunks: [],
+    raf: 0,
+    analyser,
+    actx,
+    startedAt: Date.now(),
+    lastSoundAt: Date.now(),
+    lastSec: -1,
+    stopTimer: 0,
+  };
+  mr.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size) st.chunks.push(ev.data);
+  };
+  mr.onerror = () => {
+    if (recording === st) {
+      stopRecording();
+      setPillStatus('Recording failed — try again or type instead');
+    }
+  };
+  mr.onstop = () => {
+    st.stream.getTracks().forEach((t) => t.stop());
+    void st.actx.close().catch(() => {});
+    if (!st.chunks.length) {
+      setPillStatus('Nothing heard — speak closer or type instead');
+      return;
+    }
+    setPillStatus('Heard you — transcribing…');
+    const blob = new Blob(st.chunks, { type: mr.mimeType || 'audio/webm' });
+    blobToBase64(blob).then(
+      (b64) => {
+        if (!b64) {
+          setPillStatus('Recording failed — try again or type instead');
+          return;
+        }
+        safeSend({ type: 'speechAudio', audio: b64, mime: blob.type });
+      },
+      () => setPillStatus('Recording failed — try again or type instead'),
+    );
+  };
+  recording = st;
+  setMic('listening');
+  setLevel(true, 0);
+  try {
+    mr.start(250);
+  } catch {
+    recording = null;
+    setMic('idle');
+    setLevel(false);
+    setPillStatus('Mic busy — try again');
+    return;
+  }
+  st.stopTimer = window.setTimeout(() => stopRecording(), REC_MAX_MS);
+  meterLoop(st);
+}
+/** Level proof + elapsed clock + silence auto-stop. */
+function meterLoop(st) {
+  const data = new Uint8Array(st.analyser.frequencyBinCount);
+  const tick = () => {
+    if (recording !== st) return;
+    st.analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = (data[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / data.length);
+    setLevel(true, rms * 5);
+    const now = Date.now();
+    if (rms > LEVEL_GATE) st.lastSoundAt = now;
+    const sec = Math.floor((now - st.startedAt) / 1000);
+    if (sec !== st.lastSec) {
+      st.lastSec = sec;
+      setPillStatus(`Listening ${sec}s — speak, tap mic to stop`);
+    }
+    if (now - st.lastSoundAt > SILENCE_MS && now - st.startedAt > 1200) {
+      stopRecording();
+      return;
+    }
+    st.raf = requestAnimationFrame(tick);
+  };
+  st.raf = requestAnimationFrame(tick);
+}
+function stopRecording() {
+  const st = recording;
+  recording = null;
+  if (!st) return;
+  cancelAnimationFrame(st.raf);
+  window.clearTimeout(st.stopTimer);
+  setMic('idle'); // background marks working again when transcribing/running
+  setLevel(false);
+  try {
+    if (st.mr.state !== 'inactive') st.mr.stop();
+    else st.stream.getTracks().forEach((t) => t.stop());
+  } catch {
+    st.stream.getTracks().forEach((t) => t.stop());
+  }
 }
 function setMic(mode) {
   window.__hfMode = mode;

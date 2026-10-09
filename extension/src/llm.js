@@ -201,3 +201,83 @@ export async function callLLM(system, user, signal) {
   const j = await res.json();
   return j.choices?.[0]?.message?.content ?? '{}';
 }
+/**
+ * Voice transcription with the saved provider key — the second half of our
+ * own audio pipeline (getUserMedia + MediaRecorder live in content.ts).
+ * Gemini transcribes audio natively; OpenAI-compatible providers use Whisper.
+ */
+export async function transcribeAudio(b64, mime, signal) {
+  const cfg = await getConfig();
+  if (!cfg) throw new Error('No API key — set in HandsFree popup');
+  const timeout = AbortSignal.timeout(25000);
+  const anyOf = AbortSignal.any;
+  const sig =
+    signal && typeof anyOf === 'function' ? anyOf.call(AbortSignal, [signal, timeout]) : timeout;
+  const cleanMime = mime.split(';')[0] || 'audio/webm';
+  if (cfg.provider === 'aistudio') {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:generateContent?key=${cfg.apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: sig,
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { inlineData: { mimeType: cleanMime, data: b64 } },
+                {
+                  text: 'Transcribe this short voice command exactly. Reply with ONLY the transcribed words, no quotes or commentary.',
+                },
+              ],
+            },
+          ],
+          generationConfig: { temperature: 0, maxOutputTokens: 100 },
+        }),
+      },
+    );
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      const err = new Error(`HTTP ${res.status}: ${t.slice(0, 160) || res.statusText}`);
+      err.status = res.status;
+      throw err;
+    }
+    const j = await res.json();
+    const text = (j.candidates?.[0]?.content?.parts ?? [])
+      .map((p) => p.text ?? '')
+      .join('')
+      .trim()
+      .replace(/^["'“”]+|["'“”]+$/g, '');
+    if (!text) throw new Error('transcription came back empty — speak closer and try again');
+    return text;
+  }
+  if (cfg.provider === 'deepseek' || cfg.provider === 'generic') {
+    throw new Error('voice needs a Gemini or OpenAI-compatible key — type instead for now');
+  }
+  const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const form = new FormData();
+  form.append('file', new Blob([bin], { type: cleanMime }), 'cmd.webm');
+  form.append('model', 'whisper-1');
+  form.append('response_format', 'json');
+  const headers = { Authorization: `Bearer ${cfg.apiKey}` };
+  if (cfg.provider === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://github.com/handsfree';
+    headers['X-Title'] = 'HandsFree';
+  }
+  const res = await fetch(`${openAIBaseUrl(cfg.provider)}/audio/transcriptions`, {
+    method: 'POST',
+    headers,
+    signal: sig,
+    body: form,
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    const err = new Error(`HTTP ${res.status}: ${t.slice(0, 160) || res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
+  const j = await res.json();
+  const text = (j.text ?? '').trim();
+  if (!text) throw new Error('transcription came back empty — speak closer and try again');
+  return text;
+}

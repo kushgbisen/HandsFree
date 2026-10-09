@@ -50,18 +50,18 @@ standard ARIA semantics; cross-origin iframes are not visible to the agent.
 
 ## 3. Functional Requirements
 
-| ID   | Requirement                                                                                                                                                                                      |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| FR1  | Voice input via built-in Web Speech API in the page; interim text live, final result dispatched as a command; typed fallback in the pill                                                         |
-| FR2  | Observe: scan the live DOM into role + accessible-name candidates (cap 200), excluding the pill itself, hidden and disabled nodes                                                                |
-| FR3  | Rank candidates against intent (keyword + fill-intent box boost, top 15 to the model); `scroll` tool available when nothing relevant is in view                                                  |
-| FR4  | Decide: each step the LLM emits one validated `{thought, action}` (`click / fill / navigate / pressEnter / scroll`) or `{done}`; top-15 pre-ranked shortlist; single-rule fallback without a key |
-| FR5  | Act: highlight target (400 ms), then execute the validated tool (human-like fill: expand, focus, real keystroke events)                                                                          |
-| FR6  | Multi-step: fresh observation after every act doubles as the verdict; loop continues until the model declares the goal done (max 5); per-step retries (max 2 invalid), then help text            |
-| FR7  | Verify: folded into the loop — each observation judges the previous act; single-rule keyword fallback without a key                                                                              |
-| FR8  | Interrupt: "stop/cancel/wait" aborts the running controller, clears the queue, accepts a replacement intent ("stop, actually …")                                                                 |
-| FR9  | HUD: single-line status + streaming thought line, mic morphs to stop while working, minimize, light/dark adaptive                                                                                |
-| FR10 | Key setup: provider + model + key with live Test against the provider; first-run nudge when no key is saved                                                                                      |
+| ID   | Requirement                                                                                                                                                                                                  |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| FR1  | Voice input via our own pipeline: getUserMedia + MediaRecorder in the page (live level bar, silence auto-stop), transcribed with the saved provider key (Gemini audio / Whisper); typed fallback in the pill |
+| FR2  | Observe: scan the live DOM into role + accessible-name candidates (cap 200), excluding the pill itself, hidden and disabled nodes                                                                            |
+| FR3  | Rank candidates against intent (keyword + fill-intent box boost, top 15 to the model); `scroll` tool available when nothing relevant is in view                                                              |
+| FR4  | Decide: each step the LLM emits one validated `{thought, action}` (`click / fill / navigate / pressEnter / scroll`) or `{done}`; top-15 pre-ranked shortlist; single-rule fallback without a key             |
+| FR5  | Act: highlight target (400 ms), then execute the validated tool (human-like fill: expand, focus, real keystroke events)                                                                                      |
+| FR6  | Multi-step: fresh observation after every act doubles as the verdict; loop continues until the model declares the goal done (max 5); per-step retries (max 2 invalid), then help text                        |
+| FR7  | Verify: folded into the loop — each observation judges the previous act; single-rule keyword fallback without a key                                                                                          |
+| FR8  | Interrupt: "stop/cancel/wait" aborts the running controller, clears the queue, accepts a replacement intent ("stop, actually …")                                                                             |
+| FR9  | HUD: single-line status + streaming thought line, mic morphs to stop while working, minimize, light/dark adaptive                                                                                            |
+| FR10 | Key setup: provider + model + key with live Test against the provider; first-run nudge when no key is saved                                                                                                  |
 
 ## 4. Non-Functional Requirements
 

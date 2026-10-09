@@ -5,7 +5,7 @@
  */
 import { runGoal } from './loop.js';
 import { updateHud } from './hud.js';
-import { validateKey } from './llm.js';
+import { transcribeAudio, validateKey } from './llm.js';
 
 const queue: Array<{ run: () => Promise<void>; controller: AbortController }> = [];
 let running = false;
@@ -25,6 +25,27 @@ chrome.runtime.onConnect.addListener((port) => {
 async function getActiveTabId(): Promise<number | null> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id ?? null;
+}
+
+/** Drain the serial queue. Fire-and-forget — callers never block on it. */
+function pumpQueue(): void {
+  if (running) return;
+  running = true;
+  (async () => {
+    try {
+      while (queue.length) {
+        const item = queue.shift()!;
+        runningController = item.controller;
+        try {
+          await item.run();
+        } finally {
+          runningController = null;
+        }
+      }
+    } finally {
+      running = false;
+    }
+  })();
 }
 
 /** Thin boundary: failures surface on the pill, aborts stay silent. */
@@ -135,23 +156,55 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           controller,
         });
       }
-      if (!running) {
-        running = true;
-        try {
-          while (queue.length) {
-            const item = queue.shift()!;
-            runningController = item.controller;
-            try {
-              await item.run();
-            } finally {
-              runningController = null;
-            }
-          }
-        } finally {
-          running = false;
-        }
-      }
+      pumpQueue();
       sendResponse({ ok: true });
+    }
+    if (msg.type === 'speechAudio' && typeof msg.audio === 'string') {
+      // second half of our own audio pipeline: transcribe, then run it as a
+      // normal command on the tab that recorded it
+      const fromTab: number | null = sender?.tab?.id ?? null;
+      const audio = msg.audio as string;
+      const mime = (msg.mime as string) || 'audio/webm';
+      sendResponse({ ok: true });
+      (async () => {
+        const tabId = fromTab ?? (await getActiveTabId());
+        const fail = (m: string) =>
+          tabId
+            ? updateHud(tabId, {
+                status: 'Failed',
+                verification: `Failed: ${m} — try again or type`,
+                thought: m.slice(0, 160),
+                thinking: false,
+                showStop: false,
+                working: false,
+              })
+            : Promise.resolve();
+        try {
+          if (tabId)
+            await updateHud(tabId, {
+              status: 'Transcribing…',
+              thought: 'turning speech into text',
+              thinking: true,
+            });
+          const text = (await transcribeAudio(audio, mime)).trim();
+          if (text.length < 2) {
+            await fail("didn't catch that — speak closer");
+            return;
+          }
+          currentAbort = new AbortController();
+          const signal = currentAbort.signal;
+          const controller = currentAbort;
+          queue.push({
+            run: () => runCommand(text, signal, fromTab).catch(() => {}),
+            controller,
+          });
+          pumpQueue();
+        } catch (e) {
+          console.error('[speechAudio] failed:', e);
+          await fail(e instanceof Error ? e.message : String(e));
+        }
+      })();
+      return;
     }
   })();
   return true;
