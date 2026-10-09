@@ -9,10 +9,29 @@ const HIGHLIGHT_CLASS = 'hf-highlight';
 const MIC_SVG = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`;
 const STOP_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>`;
 const MINUS_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
-const hfPort = chrome.runtime.connect({ name: 'keepalive' });
-hfPort.onDisconnect.addListener(() =>
-  setTimeout(() => chrome.runtime.connect({ name: 'keepalive' }), 1000),
-);
+// Fire-and-forget messaging that stays silent when this build is orphaned
+// (extension reloaded/updated — the new build arrives on tab refresh).
+function safeSend(msg) {
+  try {
+    if (!chrome.runtime?.id) return;
+    const p = chrome.runtime.sendMessage(msg);
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {});
+    }
+  } catch {
+    // dead context — nothing to do until refresh
+  }
+}
+function connectKeepalive() {
+  try {
+    if (!chrome.runtime?.id) return;
+    const p = chrome.runtime.connect({ name: 'keepalive' });
+    p.onDisconnect.addListener(() => setTimeout(connectKeepalive, 1000));
+  } catch {
+    // dead context — refresh brings the new build
+  }
+}
+connectKeepalive();
 function injectHud() {
   if (document.getElementById(HUD_ID)) return;
   const style = document.createElement('style');
@@ -89,7 +108,7 @@ function injectHud() {
   mic.addEventListener('click', () => {
     const m = window.__hfMode;
     if (m === 'working') {
-      chrome.runtime.sendMessage({ type: 'speech', text: 'stop', isFinal: true });
+      safeSend({ type: 'speech', text: 'stop', isFinal: true });
     } else {
       toggleMic();
     }
@@ -103,21 +122,29 @@ function injectHud() {
       const text = typeEl.value.trim();
       if (!text) return;
       typeEl.value = '';
-      chrome.runtime.sendMessage({ type: 'speech', text, isFinal: true });
+      safeSend({ type: 'speech', text, isFinal: true });
     }
   });
-  // first-run nudge: no key saved and pill still idle → point at the toolbar
-  chrome.runtime
-    .sendMessage({ type: 'hello' })
-    .then((res) => {
-      if (res && !res.hasKey) {
-        const st = document.getElementById('hf-status');
-        if (st && st.textContent?.startsWith('Tap mic')) {
-          setPillStatus('Set your key via the toolbar icon — basic mode until then');
+  // first-run nudge: no key saved and pill still idle → point at the toolbar.
+  // dead context (extension reloaded) → say so instead of failing silently.
+  try {
+    if (!chrome.runtime?.id) throw new Error('dead');
+    chrome.runtime
+      .sendMessage({ type: 'hello' })
+      .then((res) => {
+        if (res && !res.hasKey) {
+          const st = document.getElementById('hf-status');
+          if (st && st.textContent?.startsWith('Tap mic')) {
+            setPillStatus('Set your key via the toolbar icon — basic mode until then');
+          }
         }
-      }
-    })
-    .catch(() => {});
+      })
+      .catch(() => {
+        setPillStatus('Extension updated — refresh this tab');
+      });
+  } catch {
+    setPillStatus('Extension updated — refresh this tab');
+  }
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectHud);
 else injectHud();
@@ -181,7 +208,7 @@ function toggleMic() {
       if (!r.isFinal) {
         setPillStatus(text || 'Listening…');
       } else if (text.trim()) {
-        chrome.runtime.sendMessage({ type: 'speech', text: text.trim(), isFinal: true });
+        safeSend({ type: 'speech', text: text.trim(), isFinal: true });
       }
     };
   }
