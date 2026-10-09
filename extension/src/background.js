@@ -205,7 +205,7 @@ function fallbackVerify(plan, beforeUrl, afterUrl, afterCandidates) {
   }
   return { success: false, reason: 'page lost all controls after act' };
 }
-/** Real judge: compares before/after snapshots. Heuristics only on LLM failure. */
+/** Real judge: this step + the ORIGINAL goal. Names the next step when unfinished. */
 async function verify(
   transcript,
   plan,
@@ -214,16 +214,18 @@ async function verify(
   afterUrl,
   beforeCandidates,
   afterCandidates,
+  goal,
 ) {
   const short = (cs) => cs.slice(0, 30).map((c) => ({ id: c.id, description: c.description }));
-  const system = `You are HandsFree verifier. Decide if the user's intent was achieved. Return {"success":true/false,"reason":"<brief>"}.
-- Click that navigates: success if the URL or content changed toward the intent.
-- Click with no navigation expected: success if it was performed and no error is visible — do NOT fail just because the element still exists.
-- Fill/type: success only if the typed value (or its effect) is visible afterwards.
-- If an error, login wall, or captcha appeared: success false.
-- When genuinely unsure, return success true — the user can interrupt.`;
+  const goalLine = goal
+    ? `\nOriginal goal: "${goal.goal}"\nSteps done so far: ${goal.history.length ? goal.history.join(' → ') : '(none yet — this was the first step)'}\n`
+    : '';
+  const system = `You are HandsFree verifier. Judge THIS step and the ORIGINAL goal. Return {"success":true/false,"reason":"<brief>","goalDone":true/false,"next":"<one concrete next action>"}.
+- success: did this step work? Click-navigate ok if URL/content moved toward intent. Click without navigation ok if performed, no error visible. Fill ok only if the value (or its effect) shows afterwards. Error/login wall/captcha: success false. Unsure: success true.
+- goalDone: is the ORIGINAL goal fully achieved now? Single-step intents: true when success. Multi-step ("search X and open first result"): false until every part is done.
+- next: when goalDone is false, one concrete next action ("click the first result"). Omit when goalDone is true.`;
   const user =
-    `Intent: "${transcript}"\nAction taken: ${acted.method} on ${acted.description}` +
+    `${goalLine}Intent of this step: "${transcript}"\nAction taken: ${acted.method} on ${acted.description}` +
     (plan.value ? ` with value "${plan.value}"` : '') +
     `\nBefore URL: ${beforeUrl}\nAfter URL: ${afterUrl}` +
     `\nBefore controls:\n${JSON.stringify(short(beforeCandidates))}` +
@@ -234,14 +236,46 @@ async function verify(
     const raw = parsed.success !== undefined ? parsed : (parsed.verdict ?? parsed);
     if (typeof raw.success !== 'boolean' || typeof raw.reason !== 'string')
       throw new Error('bad verifier shape');
-    return { success: raw.success, reason: raw.reason };
+    return {
+      success: raw.success,
+      reason: raw.reason,
+      goalDone: raw.goalDone ?? true,
+      next: typeof raw.next === 'string' && raw.next.trim() ? raw.next.trim() : undefined,
+    };
   } catch {
-    return fallbackVerify(plan, beforeUrl, afterUrl, afterCandidates);
+    const fb = fallbackVerify(plan, beforeUrl, afterUrl, afterCandidates);
+    return { ...fb, goalDone: true };
   }
 }
+const MAX_STEPS = 5;
+/** Bounded multi-step loop: one goal, up to 5 observe→plan→act→verify rounds. */
 async function runCommand(transcript, signal) {
   try {
-    await runCommandInner(transcript, signal);
+    const goal = transcript;
+    const history = [];
+    let current = transcript;
+    for (let step = 0; step < MAX_STEPS; step++) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      const res = await runCommandInner(current, signal, { goal, history, step });
+      if (!res.ok) return;
+      history.push(res.summary);
+      if (res.goalDone || !res.next || step === MAX_STEPS - 1) {
+        if (step > 0) {
+          const tabId = await getActiveTabId();
+          if (tabId) {
+            await updateHud(tabId, {
+              status: 'Done',
+              verification: `✓ done in ${step + 1} steps — ${res.summary}`,
+              thought: history.join(' → '),
+              thinking: false,
+              showStop: false,
+            });
+          }
+        }
+        return;
+      }
+      current = res.next;
+    }
   } catch (e) {
     if (e.name === 'AbortError') throw e;
     const msg = e instanceof Error ? e.message : String(e);
@@ -258,7 +292,9 @@ async function runCommand(transcript, signal) {
     }
   }
 }
-async function runCommandInner(transcript, signal) {
+async function runCommandInner(transcript, signal, optic) {
+  const step = optic?.step ?? 0;
+  const tag = step > 0 ? `Step ${step + 1} — ` : '';
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const tabId = activeTab?.id ?? null;
   if (!tabId) throw new Error('no active tab');
@@ -269,9 +305,9 @@ async function runCommandInner(transcript, signal) {
     title: (activeTab.title ?? '').slice(0, 80),
   };
   await updateHud(tabId, {
-    transcript,
+    transcript: step === 0 ? transcript : undefined,
     isFinal: true,
-    status: 'Observing...',
+    status: `${tag}Observing...`,
     thought: 'scanning controls…',
     thinking: true,
   });
@@ -400,16 +436,18 @@ async function runCommandInner(transcript, signal) {
       afterUrl,
       preCandidates,
       afterCandidates,
+      optic ? { goal: optic.goal, history: optic.history } : undefined,
     );
+    const summary = `${candidate.description}`;
     if (result.success) {
       await updateHud(tabId, {
         verification: `✓ ${result.reason}`,
-        status: 'Verified',
+        status: step > 0 ? `${tag}Verified` : 'Verified',
         thought: result.reason,
         thinking: false,
         showStop: false,
       });
-      return;
+      return { ok: true, goalDone: result.goalDone, next: result.next, summary };
     }
     if (retries === 2) {
       await updateHud(tabId, {
@@ -418,7 +456,7 @@ async function runCommandInner(transcript, signal) {
         thinking: false,
         showStop: false,
       });
-      return;
+      return { ok: false, goalDone: true, summary };
     }
     await updateHud(tabId, {
       verification: `↻ ${result.reason}`,
@@ -427,6 +465,8 @@ async function runCommandInner(transcript, signal) {
     beforeUrl = afterUrl;
     retries++;
   }
+  // unreachable — every path inside the loop returns — but TypeScript insists
+  return { ok: false, goalDone: true, summary: 'exhausted retries' };
 }
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
