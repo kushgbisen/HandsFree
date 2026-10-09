@@ -1,6 +1,11 @@
 # Software Requirement Specification — HandsFree
 
-**Version:** 0.1 (midterm) · **Track:** Major Project · **Author:** project team
+**Version:** 0.2 (midterm) · **Track:** Major Project · **Author:** project team
+
+| Rev | Date       | Change                                              |
+| --- | ---------- | --------------------------------------------------- |
+| 0.1 | midterm wk | Initial SRS: prototype loop, planner/verifier split |
+| 0.2 | midterm wk | ReAct loop, step contract, traceability matrix      |
 
 ## 1. Introduction
 
@@ -27,10 +32,12 @@ model), SW (service worker), pill (on-page assistant card).
 
 ### 2.1 Product perspective
 
-Single extension, three parts: content script (eyes/hands/pill, runs in every
-page), background service worker (brain/queue), popup (key setup). No server,
-no second browser window. A frozen Node prototype (`src/`) exists only as a
-deterministic demo harness.
+Single extension: content script (eyes/hands/pill + voice, runs in every page),
+background worker (serial queue, interrupts, routing), ReAct loop
+(`loop.ts`: one validated model decision per step, max 5), mechanical tools
+(`tools.ts`), step contract (`prompts.ts`), provider clients (`llm.ts`),
+key-setup popup. No server, no second browser window. A frozen Node prototype
+(`src/`) exists only as a deterministic demo harness.
 
 ### 2.2 User classes
 
@@ -47,18 +54,18 @@ standard ARIA semantics; cross-origin iframes are not visible to the agent.
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | FR1  | Voice input via built-in Web Speech API in the page; interim text live, final result dispatched as a command; typed fallback in the pill                                                         |
 | FR2  | Observe: scan the live DOM into role + accessible-name candidates (cap 200), excluding the pill itself, hidden and disabled nodes                                                                |
-| FR3  | Rank candidates against intent (keyword + fill-intent box boost); scroll-to-discover (max 3) when nothing relevant is in view                                                                    |
+| FR3  | Rank candidates against intent (keyword + fill-intent box boost, top 15 to the model); `scroll` tool available when nothing relevant is in view                                                  |
 | FR4  | Decide: each step the LLM emits one validated `{thought, action}` (`click / fill / navigate / pressEnter / scroll`) or `{done}`; top-15 pre-ranked shortlist; single-rule fallback without a key |
 | FR5  | Act: highlight target (400 ms), then execute the validated tool (human-like fill: expand, focus, real keystroke events)                                                                          |
-| FR6  | Multi-step: fresh observation after every act doubles as the verdict; loop continues until the model declares the goal done (max 5)                                                              |
-| FR7  | Verify: folded into the loop — each observation judges the previous act; heuristics only on LLM failure; retries then help text                                                                  |
+| FR6  | Multi-step: fresh observation after every act doubles as the verdict; loop continues until the model declares the goal done (max 5); per-step retries (max 2 invalid), then help text            |
+| FR7  | Verify: folded into the loop — each observation judges the previous act; single-rule keyword fallback without a key                                                                              |
 | FR8  | Interrupt: "stop/cancel/wait" aborts the running controller, clears the queue, accepts a replacement intent ("stop, actually …")                                                                 |
 | FR9  | HUD: single-line status + streaming thought line, mic morphs to stop while working, minimize, light/dark adaptive                                                                                |
 | FR10 | Key setup: provider + model + key with live Test against the provider; first-run nudge when no key is saved                                                                                      |
 
 ## 4. Non-Functional Requirements
 
-- Performance: single-step command typically 3–6 s (1–3 LLM calls); heuristic paths add ~0 ms.
+- Performance: one model call per step (streamed); single-step command typically 2–5 s; local paths (ranking, heuristic submit) add ~0 ms.
 - Reliability: every failure surfaces on the pill with a retry hint; no silent hangs; abort < 500 ms.
 - Usability: one input bar, one result line; empty states and mic errors in plain words.
 - Privacy: key in `chrome.storage.local`, sent only to the chosen provider; page text sent per command; no analytics.
@@ -66,10 +73,11 @@ standard ARIA semantics; cross-origin iframes are not visible to the agent.
 
 ## 5. Architecture & Methodology
 
-Single-process MV3 design: page (senses/acts) ↔ worker (thinks/queues) ↔
-provider (reasons). Contracts between layers are Zod-shaped JSON
-(`Candidate {id,selector,description,method,role}`, `Plan {index,reasoning,value?}`),
-so any layer can be swapped (e.g. local model for cloud) without touching the others.
+Single-process MV3 design: page (senses/acts) ↔ worker (queues/routes) ↔
+loop (ReAct decisions) ↔ provider (reasons). Layers share two JSON contracts —
+`Candidate {id,selector,description,method,role}` and step
+`{thought, action:{tool,index?,value?,target?} | done, reason?}` — so any layer
+can be swapped (e.g. local model for cloud) without touching the others.
 
 Agent pattern: **ReAct with a validating executor**. Each step the model emits
 one validated `{thought, action}` or `{done}`; dumb tools execute; every
@@ -104,9 +112,10 @@ flowchart LR
 
 ## 7. Modularity, Coupling, Cohesion
 
-High cohesion (one job per file: `content.ts` senses/acts, `background.ts`
-orchestrates, `llm.ts` talks providers, `popup.ts` configures). Low coupling:
-layers share only the `Candidate`/`Plan` contracts — the planner never sees the
+High cohesion, one job per file: `content.ts` senses/acts/shows, `background.ts`
+queues/interrupts/routes, `loop.ts` decides, `tools.ts` executes, `prompts.ts`
+contracts, `llm.ts` talks providers, `popup.ts` configures. Low coupling:
+layers share only the `Candidate`/step contracts — the decider never sees the
 DOM, the page never sees the model. Content scripts are dependency-free classic
 scripts (one module token kills injection); the worker alone uses modules.
 
@@ -131,19 +140,20 @@ aborts and re-plans; M5 failure detected and retried (max 2), then help text.
 sequenceDiagram
     participant U as User
     participant P as Pill (page)
-    participant W as Worker
+    participant W as Worker+Loop
     participant L as LLM
     U->>P: speak / type
     P->>W: speech {text}
-    W->>P: observe → candidates
-    W->>W: rank + scroll-to-discover
-    W->>L: plan (streaming)
-    L-->>P: thought deltas
-    W->>P: highlight → act
-    W->>P: observe (after)
-    W->>L: verify + goalDone?
-    L-->>W: {success, goalDone, next}
-    W->>P: Verified / next step (max 5)
+    loop max 5 steps
+        W->>P: observe → candidates
+        W->>W: rank top 15
+        W->>L: step {goal, history, controls}
+        L-->>P: thought deltas (stream)
+        L-->>W: {thought, action} or {done}
+        W->>W: validate action
+        W->>P: highlight → execute tool
+    end
+    W->>P: Verified + reason
 ```
 
 ```mermaid
@@ -152,11 +162,26 @@ flowchart LR
     P -- 2. speech --> W[Worker]
     W -- 3. observe --> P
     P -- 4. candidates --> W
-    W -- 5. plan --> L[LLM]
-    L -- 6. index+value --> W
-    W -- 7. highlight+act --> P
-    W -- 8. verify --> L
-    L -- 9. verdict --> W
+    W -- 5. step --> L[LLM]
+    L -- 6. thought+action --> W
+    W -- 7. validate --> W
+    W -- 8. tool --> P
+    P -- 9. new state --> W
     W -- 10. status --> P
     P -- 11. shows --> U
 ```
+
+## 10. Traceability (FR → code → acceptance)
+
+| FR   | Implements                                          | Proves        |
+| ---- | --------------------------------------------------- | ------------- |
+| FR1  | `content.ts` toggleMic, type box                    | M1            |
+| FR2  | `content.ts` observe (ARIA)                         | M2            |
+| FR3  | `loop.ts` rankForGoal, `scroll` tool                | M2            |
+| FR4  | `prompts.ts` ACTOR_SYSTEM + validateStep, `loop.ts` | M2            |
+| FR5  | `tools.ts` actOn, `content.ts` act/highlight        | M3            |
+| FR6  | `loop.ts` runGoal (max 5)                           | M5            |
+| FR7  | observation-as-verdict, fallbackStep                | M5            |
+| FR8  | `background.ts` interrupt + queue                   | M4            |
+| FR9  | `content.ts` pill, `hud.ts`                         | M1–M5 display |
+| FR10 | `popup.ts`, `content.ts` hello nudge                | setup         |
