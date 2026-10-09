@@ -117,6 +117,9 @@ export async function streamLLM(system, user, onDelta) {
   if (!acc.trim()) throw new Error('empty stream');
   return acc;
 }
+export async function hasLLM() {
+  return (await getConfig().catch(() => null)) !== null;
+}
 export async function callLLM(system, user) {
   const cfg = await getConfig();
   if (!cfg) throw new Error('No API key — set in HandsFree popup');
