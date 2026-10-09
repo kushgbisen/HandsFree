@@ -90,6 +90,10 @@ const INTENT_STOPWORDS = new Set([
   'me',
   'go',
   'open',
+  'website',
+  'site',
+  'page',
+  'official',
 ]);
 const VERB_ONLY = new Set(['click', 'press', 'tap', 'hit', 'fill', 'type', 'open', 'go']);
 
@@ -202,6 +206,121 @@ function extractValue(transcript: string): string | undefined {
     if (m && m[1].trim()) return m[1].trim().replace(/[.?!'"]+$/, '');
   }
   return undefined;
+}
+
+/** "open X" / "go to Y" — only when the intent starts with the verb. */
+function extractNavIntent(transcript: string): { target: string; rest: string } | null {
+  const m = transcript.match(
+    /^(?:please\s+)?(?:open|go to|visit|launch|take me to|navigate to)\s+(.+)/i,
+  );
+  if (!m || !m[1].trim()) return null;
+  const full = m[1].trim().replace(/[.?!]+$/, '');
+  const andIdx = full.search(/\s+and\s+(?=[a-z])/i);
+  if (andIdx > 0) {
+    const rest = full
+      .slice(andIdx)
+      .replace(/^\s+and\s+/i, '')
+      .replace(/^(then\s+)/i, '')
+      .trim();
+    return { target: full.slice(0, andIdx).trim(), rest };
+  }
+  return { target: full, rest: '' };
+}
+
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+/** One tiny call: name → official homepage. Null when unknown. */
+async function resolveSiteUrl(name: string): Promise<{ url: string; hint: string } | null> {
+  const system = `You map site names to official homepage URLs. Reply ONLY JSON {"url":"<https url>","hint":"<main domain word>"} or {"url":null}. Example: "myupes" -> {"url":"https://www.upes.ac.in","hint":"upes"}. Unknown -> {"url":null}.`;
+  const text = await withTimeout(callLLM(system, `Site name: "${name}"`), 10000);
+  const parsed = JSON.parse(text);
+  const raw = parsed.url !== undefined ? parsed : (parsed.site ?? parsed);
+  if (!raw || typeof raw.url !== 'string' || !/^https?:\/\//i.test(raw.url)) return null;
+  return {
+    url: raw.url,
+    hint: String(raw.hint ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, ''),
+  };
+}
+
+/** Polls tab status until loaded (abort-aware). Returns the live URL. */
+async function waitForPageLive(
+  tabId: number,
+  signal: AbortSignal,
+  timeoutMs = 12000,
+): Promise<string> {
+  const start = Date.now();
+  let lastUrl = '';
+  for (;;) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) throw new Error('tab went away');
+    if (tab.url) lastUrl = tab.url;
+    if (tab.status === 'complete' && tab.url) return tab.url;
+    if (Date.now() - start > timeoutMs) {
+      if (lastUrl) return lastUrl;
+      throw new Error('page took too long to load');
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+/**
+ * Lands the tab on the named site and CHECKS it: direct URLs go straight,
+ * names resolve in one small call, unknowns fall back to Google search,
+ * and a wrong-domain landing retries via search. Throws on failure.
+ */
+async function openSite(
+  tabId: number,
+  target: string,
+  signal: AbortSignal,
+): Promise<{ url: string }> {
+  const clean =
+    target
+      .replace(/\b(official\s+)?(website|web\s*site|site|webpage|page|portal|homepage|app)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim() || target.trim();
+
+  let url: string | null = null;
+  let hint = '';
+  if (/^https?:\/\//i.test(clean)) {
+    url = clean;
+  } else if (/^localhost/i.test(clean)) {
+    url = `http://${clean}`;
+  } else if (/[.:]\w{2,}/i.test(clean) && !/\s/.test(clean)) {
+    url = `https://${clean}`;
+  } else {
+    try {
+      const r = await withTimeout(resolveSiteUrl(clean), 12000);
+      if (r?.url) {
+        url = r.url;
+        hint = r.hint;
+      }
+    } catch {
+      url = null;
+    }
+    if (!url) url = `https://www.google.com/search?q=${encodeURIComponent(clean)}`;
+  }
+
+  await chrome.tabs.update(tabId, { url });
+  const finalUrl = await waitForPageLive(tabId, signal);
+  if (hint) {
+    const host = safeHostname(finalUrl);
+    const hostCore = host.split('.')[0];
+    if (host && !host.includes(hint) && !hint.includes(hostCore)) {
+      const g = `https://www.google.com/search?q=${encodeURIComponent(clean)}`;
+      await chrome.tabs.update(tabId, { url: g });
+      return { url: await waitForPageLive(tabId, signal) };
+    }
+  }
+  return { url: finalUrl };
 }
 
 function fallbackPlan(transcript: string, candidates: Candidate[]): Plan {
@@ -373,6 +492,30 @@ async function runCommandInner(
     thought: 'scanning controls…',
     thinking: true,
   });
+
+  // universal navigation: "open X" lands on the site first, then acts.
+  // direct URLs cost zero model calls; names cost one tiny resolve call.
+  const nav = extractNavIntent(transcript);
+  if (nav) {
+    await updateHud(tabId, {
+      status: `${tag}Opening ${nav.target}…`,
+      thought: 'resolving address…',
+      thinking: true,
+    });
+    const opened = await openSite(tabId, nav.target, signal);
+    beforeUrl = opened.url;
+    if (!nav.rest) {
+      await updateHud(tabId, {
+        status: step > 0 ? `${tag}Verified` : 'Verified',
+        verification: `✓ opened ${opened.url}`,
+        thought: opened.url,
+        thinking: false,
+        showStop: false,
+      });
+      return { ok: true, goalDone: true, next: undefined, summary: `opened ${opened.url}` };
+    }
+    transcript = nav.rest;
+  }
   let retries = 0;
   while (retries <= 2) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
